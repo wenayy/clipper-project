@@ -4,12 +4,12 @@ import LiveEditor from "./LiveEditor";
 import Dashboard from "./Dashboard";
 import Pricing from "./Pricing";
 import AuthModal from "./AuthModal";
-import { fetchMe, logout, createShare } from "./api";
+import { fetchMe, logout, createShare, API_BASE } from "./api";
 import ThemeToggle, { useTheme } from "./ThemeToggle";
 import { useToast } from "./Toast";
 import StudioWizard from "./StudioWizard";
 import UpgradeModal from "./UpgradeModal";
-import WelcomeUpgrade from "./WelcomeUpgrade";
+import WelcomeUpgrade, { PaymentProcessing } from "./WelcomeUpgrade";
 import { usePlan } from "./usePlan";
 const STAGES = [
   { key: "downloading", label: "Getting your video ready", blurb: "Your video is being prepared." },
@@ -565,10 +565,8 @@ export default function App() {
     };
   }, [accountOpen]);
   const [user, setUser] = useState(null);
-  /* Set once the webhook has actually landed and the account really is on a
-     paid plan -- not merely on return from Polar. Someone who abandons checkout
-     also comes back here, and congratulating them would be worse than silence. */
   const [justUpgraded, setJustUpgraded] = useState(null);
+  const [paymentStatus, setPaymentStatus] = useState(null); // "processing" | "success" | "failed" | null
   const [authOpen, setAuthOpen] = useState(false);
   const [authMode, setAuthMode] = useState("signin");
   const [authIntent, setAuthIntent] = useState(null);
@@ -611,67 +609,12 @@ export default function App() {
     let cancelled = false;
     const params = new URLSearchParams(window.location.search);
 
-    /* Any of these means "just paid". Watching only for `payment=success` was
-       too narrow: which marker arrives depends on how checkout was started, and
-       a purchase through a Checkout Link came back carrying nothing but
-       `customer_session_token` -- so the buyer landed on a completely ordinary
-       home page with no acknowledgement that they had just been charged. */
     const returningFromPayment = params.get("payment") === "success"
       || params.has("customer_session_token")
       || params.has("checkout_id");
+    const checkoutId = params.get("checkout_id");
 
-    /* What the account was immediately before checkout, stashed by Pricing.
-       Absent for a purchase begun elsewhere, or in private mode -- so the
-       comparison below falls back to "are they off the free plan". */
-    let before = null;
-    try {
-      before = JSON.parse(window.sessionStorage.getItem("billingBeforeCheckout"));
-    } catch { /* ignore */ }
-
-    /* Did this payment actually land yet?
-
-       The old test was "does the user have any entitlements", which read as
-       "has paid" only because Free happened to have none. The moment Free
-       gained caption editing, every returning buyer matched on the first tick:
-       polling stopped before the webhook could arrive and the modal announced
-       "You're on Free" to someone who had just paid for Creator. It was also
-       always wrong for top-ups, which grant credits and change nothing else.
-
-       A real purchase moves the plan or the balance. Compare those. */
-    function paymentLanded(u) {
-      if (!u) return false;
-      if (before) return u.plan !== before.plan || (u.credits ?? 0) > before.credits;
-      return Boolean(u.plan) && u.plan !== "free";
-    }
-
-    async function refresh(attempt = 0) {
-      const nextUser = await fetchMe();
-      if (cancelled) return;
-      setUser(nextUser);
-      /* Keep polling until it does change. The webhook grants the credits and
-         it races the redirect, so a buyer can easily arrive first. */
-      if (returningFromPayment && attempt < 8 && !paymentLanded(nextUser)) {
-        window.setTimeout(() => refresh(attempt + 1).catch(() => {}), 1500);
-        return;
-      }
-      if (returningFromPayment && paymentLanded(nextUser)) {
-        try { window.sessionStorage.removeItem("billingBeforeCheckout"); }
-        catch { /* ignore */ }
-        setJustUpgraded(nextUser);
-      } else if (returningFromPayment) {
-        /* Twelve seconds and still nothing. Say so plainly instead of
-           congratulating them on a plan they did not buy -- the charge is real
-           and they need to know we know about it. */
-        toast("Payment received — your account is still updating", {
-          detail: "Refresh in a moment. If it still looks wrong, contact us "
-                + "and we'll sort it out.",
-          tone: "info",
-          ttl: 15000,
-        });
-      }
-    }
-    refresh().catch(() => {});
-
+    /* Clean URL immediately — we've captured what we need */
     if (returningFromPayment) {
       params.delete("payment");
       params.delete("checkout_id");
@@ -680,6 +623,63 @@ export default function App() {
       window.history.replaceState(window.history.state, "",
         `${window.location.pathname}${query ? `?${query}` : ""}${window.location.hash}`);
     }
+
+    async function confirmWithRetry(id, retries = 5) {
+      const token = localStorage.getItem("clipper_token");
+      if (!token) return null;
+      for (let i = 0; i <= retries; i++) {
+        if (i > 0) await new Promise((r) => setTimeout(r, 2000));
+        if (cancelled) return null;
+        try {
+          const resp = await fetch(`${API_BASE}/billing/confirm`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json",
+                       Authorization: `Bearer ${token}` },
+            body: JSON.stringify({ checkout_id: id }),
+          });
+          if (!resp.ok) continue;
+          const result = await resp.json();
+          if (result.status === "applied" || result.status === "already_applied")
+            return result;
+        } catch { /* retry */ }
+      }
+      return null;
+    }
+
+    async function boot() {
+      if (returningFromPayment && checkoutId) {
+        setPaymentStatus("processing");
+
+        let result = null;
+        try { result = await confirmWithRetry(checkoutId); }
+        catch { /* confirm failed entirely */ }
+        if (cancelled) return;
+
+        let freshUser = null;
+        try { freshUser = await fetchMe(); }
+        catch { /* fetchMe network error */ }
+        if (cancelled) return;
+        if (freshUser) setUser(freshUser);
+
+        if (result) {
+          try { window.sessionStorage.removeItem("billingBeforeCheckout"); }
+          catch { /* ignore */ }
+          setPaymentStatus("success");
+          setJustUpgraded(freshUser || { plan: result.plan, credits: result.credits });
+        } else {
+          setPaymentStatus("failed");
+        }
+        return;
+      }
+
+      /* Normal boot — not returning from payment */
+      try {
+        const u = await fetchMe();
+        if (!cancelled) setUser(u);
+      } catch { /* offline or server down */ }
+    }
+
+    boot();
     return () => { cancelled = true; };
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -1663,12 +1663,14 @@ export default function App() {
         />
       )}
 
-      {justUpgraded && (
-        <WelcomeUpgrade
+      {paymentStatus && (
+        <PaymentProcessing
+          status={paymentStatus === "success" ? "success" : paymentStatus}
           user={justUpgraded}
-          onClose={() => setJustUpgraded(null)}
+          onClose={() => { setPaymentStatus(null); setJustUpgraded(null); }}
           onStart={() => {
-            // Straight to the one thing they upgraded in order to do.
+            setPaymentStatus(null);
+            setJustUpgraded(null);
             document.querySelector('input[type="url"]')?.focus();
             window.scrollTo({ top: 0, behavior: "smooth" });
           }}

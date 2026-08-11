@@ -43,3 +43,7 @@ boto3
 # later.
 yt-dlp
 
+# Romanises Devanagari (and other non-Latin) caption text so every caption style
+# renders without a font swap.
+unidecode
+

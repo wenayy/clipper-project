@@ -51,6 +51,32 @@ def _container_cpus() -> int:
 FFMPEG_THREADS = max(1, int(os.environ.get("CLIPPER_FFMPEG_THREADS", "0"))
                      or _container_cpus())
 
+
+def _detect_hw_encoder() -> str | None:
+    """Return a hardware H.264 encoder name if one is available, else None.
+
+    Checked once at import. VideoToolbox (macOS) is the only one tested; add
+    NVENC / VAAPI here when a GPU worker exists.
+    """
+    if os.environ.get("CLIPPER_NO_HW_ENCODE", ""):
+        return None
+    try:
+        proc = subprocess.run(
+            ["ffmpeg", "-hide_banner", "-encoders"],
+            capture_output=True, text=True, timeout=5,
+        )
+        if "h264_videotoolbox" in proc.stdout:
+            return "h264_videotoolbox"
+    except Exception:
+        pass
+    return None
+
+
+HW_ENCODER = _detect_hw_encoder()
+if HW_ENCODER:
+    print(f"[render] hardware encoder available: {HW_ENCODER}")
+
+
 # The background is blurred at quarter size and then scaled back up. Blurring is
 # per-pixel work, so doing it at 540x960 instead of 1080x1920 is ~4x cheaper --
 # and since the result is heavily blurred anyway, the upscale is invisible.
@@ -669,6 +695,19 @@ def watermark_filter(text: str, video_label: str, height: int) -> tuple:
     )
 
 
+def _hw_encode_flags(high_quality: bool, reframe_plan) -> list[str]:
+    """Pick encoder flags: hardware (VideoToolbox) when available, else libx264."""
+    if HW_ENCODER == "h264_videotoolbox":
+        # VideoToolbox uses -q:v (1-100, higher = better) instead of CRF.
+        quality = "55" if high_quality else "65"
+        return ["-c:v", "h264_videotoolbox", "-q:v", quality]
+    if high_quality:
+        crf = "17" if reframe_plan else "18"
+        return ["-c:v", "libx264", "-preset", "slow", "-crf", crf]
+    crf = "19" if reframe_plan else "20"
+    return ["-c:v", "libx264", "-preset", "veryfast", "-crf", crf]
+
+
 def render_clip(
     video_path: str,
     start: float,
@@ -842,11 +881,7 @@ def render_clip(
         # encoder time for a difference the platforms usually recompress away.
         # Worth it for footage that will be re-cut or archived, not worth it by
         # default -- which is why the default did not change.
-        *(["-c:v", "libx264", "-preset", "slow",
-           "-crf", "17" if reframe_plan else "18"]
-          if high_quality else
-          ["-c:v", "libx264", "-preset", "veryfast",
-           "-crf", "19" if reframe_plan else "20"]),
+        *(_hw_encode_flags(high_quality, reframe_plan)),
         # Bounded on purpose. x264 allocates per-thread frame buffers sized from
         # the CPU count it can see, and in a container that is the HOST's count
         # -- 48 on Railway against 8 on a laptop -- while the memory ceiling

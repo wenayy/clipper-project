@@ -1,22 +1,6 @@
 import { createPortal } from "react-dom";
+import { useEffect, useState } from "react";
 
-/* Shown once, after a payment has actually been fulfilled.
- *
- * The moment someone pays is the one moment they are certain they made a good
- * decision, and it was being wasted: checkout finished, Polar sent them back,
- * and the app looked exactly as it had before -- same balance, same everything,
- * no acknowledgement that money had changed hands. That silence reads as a
- * failed payment, and the first thing a buyer does about a failed payment is
- * ask for it back.
- *
- * So: confirm the charge landed, show the balance they can now see for
- * themselves, name what they just unlocked, and point at the one action they
- * came here to do. It is deliberately not a receipt -- Polar sends that.
- */
-
-/* Entitlement key -> what it means to someone who just bought it. Keyed off the
-   server's own entitlement list rather than a hardcoded plan description, so a
-   plan that gains a capability advertises it here without a frontend change. */
 const UNLOCKED = {
   multilingual: "Captions for speech that switches language mid-sentence",
   gameplay: "Gameplay split-screen layout",
@@ -28,54 +12,121 @@ const UNLOCKED = {
   priority: "Priority rendering",
 };
 
-export default function WelcomeUpgrade({ user, onClose, onStart }) {
-  if (!user) return null;
+export function PaymentProcessing({ status, user, onClose, onStart }) {
+  const [dots, setDots] = useState("");
+  useEffect(() => {
+    if (status !== "processing") return;
+    const id = setInterval(() => setDots((d) => (d.length >= 3 ? "" : d + ".")), 400);
+    return () => clearInterval(id);
+  }, [status]);
 
-  const planName = (user.plan || "creator").replace(/^./, (c) => c.toUpperCase());
-  const credits = user.credits ?? 0;
+  if (!status) return null;
+
+  const isSuccess = status === "success" && user;
+  const isFailed = status === "failed";
+
+  const planName = isSuccess
+    ? (user.plan || "creator").replace(/^./, (c) => c.toUpperCase())
+    : "";
+  const credits = isSuccess ? (user.credits ?? 0) : 0;
   const clips = Math.floor(credits / 10);
-  const perks = (user.entitlements || [])
-    .map((key) => UNLOCKED[key])
-    .filter(Boolean);
+  const perks = isSuccess
+    ? (user.entitlements || []).map((k) => UNLOCKED[k]).filter(Boolean)
+    : [];
 
   return createPortal(
-    <div className="upgrade-veil" onClick={onClose} data-testid="welcome-upgrade">
-      <div className="upgrade-card welcome-card" onClick={(e) => e.stopPropagation()}
-           role="dialog" aria-modal="true" aria-labelledby="welcome-title">
-        <button className="upgrade-x" onClick={onClose} aria-label="Close">×</button>
+    <div className="upgrade-veil" data-testid="payment-processing">
+      <div
+        className={`upgrade-card welcome-card${isSuccess ? " welcome-success" : ""}`}
+        onClick={(e) => e.stopPropagation()}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="welcome-title"
+      >
+        {isSuccess && (
+          <button className="upgrade-x" onClick={onClose} aria-label="Close">
+            ×
+          </button>
+        )}
 
-        <span className="upgrade-eyebrow">Payment confirmed</span>
-        <h3 id="welcome-title">You&rsquo;re on {planName}. 🎉</h3>
-
-        {/* The balance first: it is the thing they just bought, and seeing the
-            real number is what proves the payment actually landed. */}
-        <p className="welcome-balance">
-          <strong>{credits.toLocaleString()}</strong> credits
-          <span> — about {clips.toLocaleString()} finished clips</span>
-        </p>
-
-        {perks.length > 0 && (
+        {status === "processing" && (
           <>
-            <p className="upgrade-sub">Now unlocked for you:</p>
-            <ul className="welcome-perks">
-              {perks.map((perk) => (
-                <li key={perk}>{perk}</li>
-              ))}
-            </ul>
+            <div className="payment-spinner" />
+            <h3 id="welcome-title">Setting up your account{dots}</h3>
+            <p className="upgrade-sub">
+              Confirming payment and adding your credits. This takes just a
+              moment.
+            </p>
           </>
         )}
 
-        <div className="upgrade-actions">
-          <button className="btn btn-ghost btn-sm" onClick={onClose}>
-            Later
-          </button>
-          <button className="btn btn-primary btn-sm"
-                  onClick={() => { onClose?.(); onStart?.(); }}>
-            Make your first clip →
-          </button>
-        </div>
+        {isSuccess && (
+          <>
+            <span className="upgrade-eyebrow">Payment confirmed</span>
+            <h3 id="welcome-title">
+              Welcome to {planName}! 🎉
+            </h3>
+            <p className="welcome-balance">
+              <strong>{credits.toLocaleString()}</strong> credits
+              <span> — about {clips.toLocaleString()} finished clips</span>
+            </p>
+            {perks.length > 0 && (
+              <>
+                <p className="upgrade-sub">Now unlocked for you:</p>
+                <ul className="welcome-perks">
+                  {perks.map((perk) => (
+                    <li key={perk}>{perk}</li>
+                  ))}
+                </ul>
+              </>
+            )}
+            <div className="upgrade-actions">
+              <button className="btn btn-ghost btn-sm" onClick={onClose}>
+                Later
+              </button>
+              <button
+                className="btn btn-primary btn-sm"
+                onClick={() => {
+                  onClose?.();
+                  onStart?.();
+                }}
+              >
+                Start creating →
+              </button>
+            </div>
+          </>
+        )}
+
+        {isFailed && (
+          <>
+            <h3 id="welcome-title">Almost there</h3>
+            <p className="upgrade-sub">
+              Your payment went through but your account is still updating.
+              This usually resolves in a few seconds.
+            </p>
+            <div className="upgrade-actions">
+              <button
+                className="btn btn-primary btn-sm"
+                onClick={() => window.location.reload()}
+              >
+                Refresh now
+              </button>
+            </div>
+          </>
+        )}
       </div>
     </div>,
-    document.body
+    document.body,
+  );
+}
+
+export default function WelcomeUpgrade({ user, onClose, onStart }) {
+  return (
+    <PaymentProcessing
+      status="success"
+      user={user}
+      onClose={onClose}
+      onStart={onStart}
+    />
   );
 }

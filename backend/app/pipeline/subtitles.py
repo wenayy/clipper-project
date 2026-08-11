@@ -239,29 +239,66 @@ def _covers_devanagari(family: str) -> bool:
                for e in FONTS.values())
 
 
+def _romanize(text: str) -> str:
+    """Transliterate non-Latin text (Devanagari, etc.) to ASCII Roman script."""
+    try:
+        from unidecode import unidecode
+        return unidecode(text)
+    except ImportError:
+        return text
+
+
+def _romanize_words(words: list) -> list:
+    """Romanize the 'word'/'punctuated_word' fields of Deepgram word objects."""
+    out = []
+    for w in words:
+        if not _is_devanagari(_word_text(w)):
+            out.append(w)
+            continue
+        w = dict(w)
+        if "punctuated_word" in w:
+            w["punctuated_word"] = _romanize(w["punctuated_word"])
+        if "word" in w:
+            w["word"] = _romanize(w["word"])
+        out.append(w)
+    return out
+
+
 def _fit_devanagari(st: dict, caption_text: str, title: str,
                     title_font: str) -> tuple:
     """(style, title_font) adjusted so each can draw the text it carries.
 
-    Caption and title are judged on their OWN text and swapped independently,
-    because they are separate ASS styles fed from separate sources. The analyzer
-    writes titles in the video's language, so a Hindi source gets a Hindi title
-    even when the speech is romanised and the captions are pure ASCII -- a clip
-    whose captions are fine and whose title alone fails the render.
-
-    Shared by both ASS builders. build_ass_lines is the translated-subtitle
-    path, where asking for Hindi guarantees Devanagari, so it needs this at
-    least as much as the karaoke one does.
+    Prefers romanization over a font swap: transliterating Devanagari to Latin
+    keeps the user's chosen caption style intact. Falls back to a font swap
+    only when unidecode is unavailable.
     """
     caption_needs = _is_devanagari(caption_text)
     title_needs = _is_devanagari(title or "")
     if not (caption_needs or title_needs):
         return st, title_font
 
+    # Try romanization first -- keeps the chosen font.
+    try:
+        from unidecode import unidecode  # noqa: F811
+        _has_unidecode = True
+    except ImportError:
+        _has_unidecode = False
+
+    if _has_unidecode:
+        # Romanization happens at the word level (in build_ass via
+        # _romanize_words), so the font stays unchanged. Nothing to do here
+        # for captions. Title is a plain string, romanize it directly.
+        if title_needs:
+            print(f"[clipper] title contains Devanagari; romanizing to keep "
+                  f"{resolve_font(title_font) or TITLE_STYLE['font']}")
+        if caption_needs:
+            print(f"[clipper] captions contain Devanagari; romanizing to keep "
+                  f"{st['font']}")
+        return st, title_font
+
+    # Fallback: swap to a Devanagari-capable font.
     font_id, family = devanagari_font()
     if not family:
-        # Nothing shipped can draw it. Let it fail loudly at ffmpeg rather than
-        # silently swapping to another face that also cannot.
         print("[clipper] text needs Devanagari but no shipped font provides it")
         return st, title_font
 
@@ -798,11 +835,14 @@ def build_ass(words: list, clip_start_time: float, out_path: str,
         st = {**st, "size": max(MIN_CAPTION_PX, min(MAX_CAPTION_PX, int(size_px)))}
     st = _recolour(st, color, active_color)
 
-    # Whole style rather than per-run: mixing two faces inside a line looks like
-    # a bug, and naming the Hindi face around each run would mean emitting \fn
-    # overrides into cues already carrying karaoke colour state.
-    st, title_font = _fit_devanagari(
-        st, "".join(_word_text(w) for w in words), title, title_font)
+    # Romanize Devanagari words so the chosen caption font is preserved.
+    # _fit_devanagari decides whether romanization or a font swap is needed.
+    caption_text = "".join(_word_text(w) for w in words)
+    st, title_font = _fit_devanagari(st, caption_text, title, title_font)
+    if _is_devanagari(caption_text):
+        words = _romanize_words(words)
+    if _is_devanagari(title or ""):
+        title = _romanize(title)
 
     lines = [_header(margin_v, st, play_res, title_style, title_font)]
     lines.append(_title_events(title, play_res, title_style))
@@ -963,9 +1003,15 @@ def build_ass_lines(caption_lines: list, out_path: str,
     if size_px:
         st = {**st, "size": max(MIN_CAPTION_PX, min(MAX_CAPTION_PX, int(size_px)))}
     st = _recolour(st, color, active_color)
-    st, title_font = _fit_devanagari(
-        st, " ".join((l.get("text") or "") for l in caption_lines),
-        title, title_font)
+    caption_text = " ".join((l.get("text") or "") for l in caption_lines)
+    st, title_font = _fit_devanagari(st, caption_text, title, title_font)
+    if _is_devanagari(caption_text):
+        caption_lines = [
+            {**l, "text": _romanize(l.get("text") or "")} if _is_devanagari(l.get("text") or "") else l
+            for l in caption_lines
+        ]
+    if _is_devanagari(title or ""):
+        title = _romanize(title)
 
     out = [_header(margin_v, st, play_res, title_style, title_font),
            _title_events(title, play_res, title_style)]

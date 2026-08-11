@@ -622,6 +622,89 @@ def checkout(body: CheckoutRequest, user: User = Depends(auth.current_user_requi
     return {"status": "ready", "checkout_url": url, "line_item": line_item}
 
 
+@app.post("/billing/confirm")
+def confirm_checkout(body: dict, user: User = Depends(auth.current_user_required)):
+    """Poll Polar for a completed checkout and fulfill it immediately.
+
+    The webhook is the primary fulfillment path, but it requires Polar to reach
+    the server -- which fails on localhost and behind firewalls. This endpoint
+    lets the frontend confirm a payment by checkout_id when the user returns
+    from Polar, so credits arrive even without a working webhook.
+    """
+    checkout_id = (body.get("checkout_id") or "").strip()
+    if not checkout_id:
+        raise HTTPException(status_code=400, detail="Missing checkout_id.")
+
+    client = polar_payments._client()
+    if not client:
+        raise HTTPException(status_code=503, detail="Payment provider not configured.")
+
+    try:
+        checkout = client.checkouts.get(id=checkout_id)
+    except Exception as exc:
+        print(f"[clipper] confirm: could not fetch checkout {checkout_id}: {exc}")
+        raise HTTPException(status_code=502, detail="Could not verify payment.") from exc
+
+    raw_status = getattr(checkout, "status", None)
+    status = raw_status.value if hasattr(raw_status, "value") else str(raw_status)
+    print(f"[clipper] confirm: checkout {checkout_id} raw_status={raw_status!r} resolved={status!r}")
+    if status not in ("succeeded", "confirmed"):
+        print(f"[clipper] confirm: checkout not finalized yet, returning pending")
+        return {"status": "pending", "checkout_status": status}
+
+    product_id = None
+    for item in getattr(checkout, "product_prices", []) or []:
+        pid = getattr(item, "product_id", None) or (item.get("product_id") if isinstance(item, dict) else None)
+        if pid:
+            product_id = pid
+            break
+    if not product_id:
+        product_id = getattr(checkout, "product_id", None)
+    if not product_id:
+        metadata = getattr(checkout, "metadata", {}) or {}
+        if isinstance(metadata, dict):
+            product_id = metadata.get("product_id")
+
+    product = polar_payments.product_by_id(product_id) if product_id else None
+    if not product:
+        print(f"[clipper] confirm: no catalog entry for product_id={product_id!r} "
+              f"(checkout {checkout_id})")
+        raise HTTPException(status_code=400, detail="Unknown product in this checkout.")
+
+    with SessionLocal() as session:
+        db_user = session.get(User, user.id)
+        if not db_user:
+            raise HTTPException(status_code=404, detail="User not found.")
+
+        from app.models import PolarOrderGrant, CreditLedger
+        existing = (session.query(PolarOrderGrant)
+                    .filter(PolarOrderGrant.order_id == checkout_id).first())
+        if existing:
+            return {"status": "already_applied", "credits": db_user.credits,
+                    "plan": db_user.plan}
+
+        session.add(PolarOrderGrant(
+            order_id=checkout_id, user_id=db_user.id,
+            product_id=product.product_id, credits=product.grant_credits,
+        ))
+        db_user.credits += product.grant_credits
+        note = (f"Polar {product.plan_id.title()} subscription"
+                if product.kind == "subscription"
+                else "Polar credit top-up")
+        session.add(CreditLedger(
+            user_id=db_user.id, delta=product.grant_credits,
+            balance_after=db_user.credits, note=note,
+        ))
+        if product.kind == "subscription":
+            db_user.plan = product.plan_id
+        session.commit()
+
+        print(f"[clipper] confirm: granted {product.grant_credits} credits to "
+              f"{db_user.email} (checkout {checkout_id}, plan={db_user.plan})")
+        return {"status": "applied", "credits": db_user.credits,
+                "plan": db_user.plan}
+
+
 @app.post("/billing/polar/webhook", status_code=202)
 async def polar_webhook(request: Request):
     """Verify Polar's signature, then fulfill paid orders exactly once."""
@@ -640,10 +723,11 @@ async def polar_webhook(request: Request):
     try:
         result = polar_payments.handle_event(event, event_id)
     except polar_payments.PolarConfigurationError as exc:
-        # A retry after fixing the catalog should succeed, so do not acknowledge
-        # configuration mismatches with a 2xx response.
         print(f"[clipper] Polar fulfillment error: {exc}")
         raise HTTPException(status_code=503, detail="Payment update needs attention.") from exc
+    except Exception as exc:
+        print(f"[clipper] Polar webhook handler crashed: {type(exc).__name__}: {exc}")
+        raise HTTPException(status_code=500, detail="Internal error processing webhook.") from exc
     return {"received": True, **result}
 
 
@@ -874,8 +958,8 @@ def job_transcript(job_id: str):
     }
 
 
-@app.get("/jobs/{job_id}/gameplay")
-def job_gameplay(job_id: str):
+@app.api_route("/jobs/{job_id}/gameplay", methods=["GET", "HEAD"])
+def job_gameplay(job_id: str, request: Request):
     """The gameplay loop this job renders with, so the editor can show the
     split-screen composition instead of the bare source."""
     job = get_job(job_id)
@@ -889,7 +973,56 @@ def job_gameplay(job_id: str):
     if not loops:
         raise HTTPException(status_code=404, detail="No gameplay assets available")
     # Same round-robin the renderer uses, so the preview shows THIS clip's loop.
-    return FileResponse(loops[0], media_type="video/mp4")
+    path = loops[0]
+    # Detect the actual media type from the file extension.
+    ext = os.path.splitext(path)[1].lower()
+    media_type = {".webm": "video/webm", ".mp4": "video/mp4"}.get(ext, "video/mp4")
+    size = os.path.getsize(path)
+
+    if request.method == "HEAD":
+        return Response(status_code=200, media_type=media_type,
+                        headers={"Accept-Ranges": "bytes",
+                                 "Content-Length": str(size)})
+
+    # Range support -- without it the browser's video player gets 416 on seek.
+    range_header = request.headers.get("range")
+    if not range_header:
+        return FileResponse(path, media_type=media_type,
+                            headers={"Accept-Ranges": "bytes"})
+
+    try:
+        _, _, span = range_header.partition("=")
+        start_s, _, end_s = span.partition("-")
+        start = int(start_s)
+        end = int(end_s) if end_s else size - 1
+    except ValueError:
+        raise HTTPException(status_code=416, detail="Malformed Range header.")
+
+    if start >= size:
+        return Response(status_code=416,
+                        headers={"Content-Range": f"bytes */{size}"})
+    start = max(0, min(start, size - 1))
+    end = max(start, min(end, size - 1))
+
+    def chunks():
+        with open(path, "rb") as f:
+            f.seek(start)
+            remaining = end - start + 1
+            while remaining > 0:
+                data = f.read(min(65536, remaining))
+                if not data:
+                    break
+                remaining -= len(data)
+                yield data
+
+    return StreamingResponse(
+        chunks(), status_code=206, media_type=media_type,
+        headers={
+            "Content-Range": f"bytes {start}-{end}/{size}",
+            "Accept-Ranges": "bytes",
+            "Content-Length": str(end - start + 1),
+        },
+    )
 
 
 @app.api_route("/jobs/{job_id}/preview", methods=["GET", "HEAD"])
@@ -2008,28 +2141,20 @@ def _run_pipeline_locked(job_id: str, req: JobRequest, gameplay_loops: list = No
                          tpl["frame"], render.caption_margin_v)
             margin_v = place(src_w, src_h, out_w, out_h)
 
-        results = []
+        # -- Prepare each clip (subtitles, reframing, voiceover) sequentially,
+        # because some steps make network calls or write shared state.
+        # Then render the actual ffmpeg encodes in parallel.
         total = len(resolved_clips)
+        prepared = []  # list of dicts with everything render_clip needs
+
         for i, clip in enumerate(resolved_clips, start=1):
-            update_job(
-                job_id,
-                progress_message=f"Finishing clip {i} of {total}...",
-                percent=round(50 + (i - 1) / total * 50),
-            )
             subtitle_path = None
             audio_override = None
             clip_words = clip["words"]
 
-            # Where the people actually are in THIS clip. Per clip rather than
-            # per job: a podcast cuts between a two-shot and a single, so one
-            # plan for the whole source would frame most of the clips wrongly.
-            # None is a normal answer -- see reframe.plan.
             clip_plan = None
             clip_margin_v = margin_v
             if tpl["frame"] == "podcast":
-                # Broad except on purpose. Reframing is an ENHANCEMENT -- the
-                # template renders without it -- so no failure in detection is
-                # worth losing a job the user has already paid to transcribe.
                 try:
                     clip_plan = reframe.plan(
                         video_path, clip["start"], clip["end"], out_w, out_h,
@@ -2040,9 +2165,6 @@ def _run_pipeline_locked(job_id: str, req: JobRequest, gameplay_loops: list = No
                 if clip_plan:
                     print(f"[clipper] clip {i}: reframing as {clip_plan['mode']}")
                     clip_margin_v = render.smart_caption_margin_v(clip_plan, out_h)
-                    # Save the exact plan used for the export before the large
-                    # source is reclaimed. The editor can then reproduce this
-                    # composition without another face-analysis pass.
                     cache_path = os.path.join(
                         job_dir,
                         (f"reframe_v{reframe.PLAN_VERSION}_{i - 1}_"
@@ -2051,9 +2173,6 @@ def _run_pipeline_locked(job_id: str, req: JobRequest, gameplay_loops: list = No
                     with open(cache_path, "w") as cache_file:
                         json.dump(clip_plan, cache_file)
 
-            # Dead air is what makes a clip feel trimmed rather than edited, so
-            # this is on by default. Captions must use the remapped timings or
-            # they desync by exactly the amount removed.
             segments = None
             render_duration = clip["end"] - clip["start"]
             if req.tighten_pauses and clip_words:
@@ -2061,7 +2180,7 @@ def _run_pipeline_locked(job_id: str, req: JobRequest, gameplay_loops: list = No
                     clip_words, clip["start"], clip["end"],
                     max_pause=pacing.max_pause_for_frame(tpl["frame"]))
                 if removed < 0.4:
-                    segments, clip_words = None, clip["words"]   # not worth a re-cut
+                    segments, clip_words = None, clip["words"]
                 else:
                     render_duration = sum(e - s for s, e in segments)
                     print(f"[clipper] clip {i}: removed {removed:.1f}s of dead air")
@@ -2078,9 +2197,6 @@ def _run_pipeline_locked(job_id: str, req: JobRequest, gameplay_loops: list = No
                 if req.burn_subtitles and clip_words:
                     subtitle_path = os.path.join(job_dir, f"clip_{i}.ass")
                     caption_preset_id = caption_presets.get(req.caption_style)["id"]
-                    # Planned here rather than inside build_ass so the renderer
-                    # stays free of network calls. Returns {} on any failure --
-                    # a clip without emoji is worth far more than a failed job.
                     cue_emoji = (
                         caption_emoji.plan(caption_words, caption_preset_id)
                         if req.auto_emoji else {}
@@ -2101,44 +2217,82 @@ def _run_pipeline_locked(job_id: str, req: JobRequest, gameplay_loops: list = No
                 audio_override = os.path.join(job_dir, f"voiceover_{i}.mp3")
                 voiceover.generate_voiceover_audio(script_text, audio_override, req.voice)
                 clip["voiceover_script"] = script_text
-                end_time = clip["start"] + 9999  # duration governed by -shortest against the voiceover
+                end_time = clip["start"] + 9999
 
             out_name = f"clip_{i}.mp4"
-            render.render_clip(
-                video_path,
-                clip["start"],
-                end_time,
-                os.path.join(job_dir, out_name),
-                subtitle_path=subtitle_path,
-                audio_override_path=audio_override,
-                # Round-robin so consecutive clips never reuse the same loop.
-                gameplay_path=(gameplay_loops[(i - 1) % len(gameplay_loops)]
-                               if gameplay_loops else None),
-                ratio=req.ratio,
-                frame=tpl["frame"],
-                segments=segments,
-                mute_spans=mute_spans,
-                reframe_plan=clip_plan,
-                watermark=options_watermark,
-                high_quality=bool(job_options.get("high_quality")),
-            )
+            prepared.append({
+                "index": i,
+                "clip": clip,
+                "clip_words": clip_words,
+                "out_name": out_name,
+                "render_duration": render_duration,
+                "render_kwargs": dict(
+                    video_path=video_path,
+                    start=clip["start"],
+                    end=end_time,
+                    out_path=os.path.join(job_dir, out_name),
+                    subtitle_path=subtitle_path,
+                    audio_override_path=audio_override,
+                    gameplay_path=(gameplay_loops[(i - 1) % len(gameplay_loops)]
+                                   if gameplay_loops else None),
+                    ratio=req.ratio,
+                    frame=tpl["frame"],
+                    segments=segments,
+                    mute_spans=mute_spans,
+                    reframe_plan=clip_plan,
+                    watermark=options_watermark,
+                    high_quality=bool(job_options.get("high_quality")),
+                ),
+            })
 
-            # Raw scores rank the clips; these are what gets shown. The mapping
-            # is monotonic, so display never disagrees with the chosen order.
+        # -- Render clips in parallel. Each ffmpeg process is independent; they
+        # read the same source file but write to separate outputs. On a Mac
+        # with hardware encoding this is nearly free; on a container the
+        # worker count is capped to avoid OOM.
+        import concurrent.futures
+
+        max_parallel = max(1, int(os.environ.get("CLIPPER_PARALLEL_RENDERS", "3")))
+        done_count = 0
+        done_lock = threading.Lock()
+
+        def _render_one(item):
+            nonlocal done_count
+            kw = item["render_kwargs"]
+            render.render_clip(**kw)
+            with done_lock:
+                done_count += 1
+                update_job(
+                    job_id,
+                    progress_message=f"Finishing clips... {done_count} of {total} done",
+                    percent=round(50 + done_count / total * 50),
+                )
+
+        update_job(job_id,
+                   progress_message=f"Finishing {total} clips...",
+                   percent=50)
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=max_parallel) as pool:
+            futures = {pool.submit(_render_one, item): item for item in prepared}
+            for future in concurrent.futures.as_completed(futures):
+                future.result()  # raises if a render failed
+
+        # -- Collect results in clip order.
+        results = []
+        for item in prepared:
+            clip = item["clip"]
             shown_score, shown_scores = scoring.presentation_score(
                 clip.get("score") or 0, clip.get("scores") or {})
-
             results.append({
-                "file": out_name,
+                "file": item["out_name"],
                 "title": clip["title"],
                 "hook": clip["hook"],
                 "start": clip["start"],
                 "end": clip["end"],
-                "duration": round(render_duration, 1),
+                "duration": round(item["render_duration"], 1),
                 "score": shown_score,
                 "scores": shown_scores,
                 "voiceover_script": clip.get("voiceover_script"),
-                "words": clip_words,
+                "words": item["clip_words"],
             })
 
         # Publish BEFORE marking the job done. The status is what makes clips
