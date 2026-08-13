@@ -42,7 +42,7 @@ FREE_SIGNUP_CREDITS = 20           # 2 finished clips to try it with
 # Per-clip pricing decouples revenue from source length, so this is what stops
 # a 6-hour upload costing more to transcribe than the clips are worth. Not a
 # quality limit -- purely the point where the economics invert.
-MAX_SOURCE_MINUTES = 240
+MAX_SOURCE_MINUTES = 120
 
 PLANS = [
     {
@@ -54,6 +54,7 @@ PLANS = [
         "credits": FREE_SIGNUP_CREDITS,
         "features": [
             f"{FREE_SIGNUP_CREDITS // CREDITS_PER_CLIP} free clips on signup",
+            "480p output quality",
             "Projects saved for 3 hours",
             "Full caption editing in the editor",
             "One edited export",
@@ -80,6 +81,7 @@ PLANS = [
         ],
         "features": [
             "100 ready-to-post clips each month",
+            "Full HD 1080p output",
             "Projects saved for 3 days",
             "Unlimited edited exports, no watermark",
             "Multilingual captions",
@@ -150,15 +152,15 @@ ENTITLEMENTS = {
 # real clips off a 15-minute video is a genuine trial, and the ceiling is the
 # reason to upgrade -- not a broken experience.
 LIMITS = {
-    # 200 MB pairs with the 15-minute ceiling: a quarter-hour of ordinary
-    # 1080p lands well inside it, so the two limits bite at roughly the same
+    # 100 MB pairs with the 15-minute ceiling and the 480p cap: a quarter-hour
+    # at 480p lands well inside it, so the two limits bite at roughly the same
     # point instead of one silently overriding the other.
     "free":    {"max_clips": 2,  "max_source_minutes": 15,
-                "max_upload_mb": 200},
+                "max_upload_mb": 100, "max_video_height": 480},
     "creator": {"max_clips": 10, "max_source_minutes": MAX_SOURCE_MINUTES,
-                "max_upload_mb": 2048},
+                "max_upload_mb": 2048, "max_video_height": 1080},
     "pro":     {"max_clips": 10, "max_source_minutes": 720,
-                "max_upload_mb": 4096},
+                "max_upload_mb": 4096, "max_video_height": 1080},
 }
 
 # Finished projects remain editable for a short, explicit window. Keeping this

@@ -9,7 +9,7 @@ import { getPlans } from "./api";
  * studio has to show them to someone who has not signed in yet.
  */
 
-const FALLBACK = { max_clips: 2, max_source_minutes: 15, max_upload_mb: 500 };
+const FALLBACK = { max_clips: 2, max_source_minutes: 15, max_upload_mb: 100 };
 
 export function usePlan(user) {
   const [catalogue, setCatalogue] = useState(null);

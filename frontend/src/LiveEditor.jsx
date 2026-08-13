@@ -366,6 +366,7 @@ export default function LiveEditor({
     start: initial.start ?? clip.start,
     end: initial.end ?? clip.end,
     ratio: initial.ratio || job.options?.ratio || "9:16",
+    template: initial.template || job.options?.template || "classic",
     capStyle: initial.caption_style || job.options?.caption_style || "classic",
     capFont: initial.caption_font ?? null,
     capSize: initial.caption_size ?? null,       // null = the style's own size
@@ -396,7 +397,7 @@ export default function LiveEditor({
   const history = useEditHistory(initialDoc);
   const doc = history.state;
   const {
-    start, end, ratio, capStyle, capFont, capSize, capPos, capAnim,
+    start, end, ratio, template, capStyle, capFont, capSize, capPos, capAnim,
     capColor, capActive, capOn,
     translateTo, title, titleStyle, titleFont, speed, speedPitched, tightenPauses,
     background,
@@ -429,6 +430,7 @@ export default function LiveEditor({
   const setStart = set("start");
   const setEnd = set("end");
   const setRatio = (v) => history.apply({ ratio: v }, { discrete: true });
+  const setTemplate = (v) => history.apply({ template: v }, { discrete: true });
   const setCapStyle = (v) => history.apply({ capStyle: v }, { discrete: true });
   const setCapFont = (v) => history.apply({ capFont: v }, { discrete: true });
   const setCapSize = (v) => history.apply({ capSize: v });
@@ -504,9 +506,12 @@ export default function LiveEditor({
   /* Templates that composite something on top of the source have to be shown
      composited, or the editor is previewing a different video than it exports.
      Split-screen is the loud case: half the frame is gameplay. */
-  const frame = job.options?.frame
+  const TEMPLATE_FRAMES = { classic: "blur", fitvideo: "fit", gameplay: "gameplay" };
+  const activeTemplate = template || job.options?.template || "classic";
+  const frame = TEMPLATE_FRAMES[activeTemplate]
+    || job.options?.frame
     || (job.options?.template === "gameplay" ? "gameplay" : null);
-  const isSplit = frame === "gameplay" || job.options?.template === "gameplay";
+  const isSplit = activeTemplate === "gameplay";
   /* render.render_clip defaults to "blur" when no frame is set, so the preview
      has to default the same way or it previews a mode nobody exports. */
   const frameMode = isSplit ? "gameplay" : (frame || "blur");
@@ -752,6 +757,7 @@ export default function LiveEditor({
         }));
       saveClipEdit(job.id, index, {
         start, end, ratio,
+        template,
         caption_style: capStyle,
         caption_font: capFont,
         caption_size: capSize,
@@ -1482,6 +1488,18 @@ export default function LiveEditor({
         {/* Controls — every one of these is instant */}
         {section === "layout" && (
         <div className="live-controls">
+          <div className="ctl">
+            <span className="ctl-label">Template</span>
+            {[
+              { id: "classic",  label: "Classic" },
+              { id: "gameplay", label: "Gameplay" },
+              { id: "fitvideo", label: "Fit video" },
+            ].map((t) => (
+              <button key={t.id}
+                      className={`chip-btn ${activeTemplate === t.id ? "on" : ""}`}
+                      onClick={() => setTemplate(t.id)}>{t.label}</button>
+            ))}
+          </div>
           <div className="ctl">
             <span className="ctl-label">Ratio</span>
             {Object.keys(RATIOS).map((r) => (

@@ -167,7 +167,7 @@ RATIOS = {
 # The cap is the real safety: it bounds how much of the sides can be thrown away
 # for a wide shot, where the edges are scenery rather than room.
 MIN_CONTENT_FRACTION = 0.55     # aim for the video covering >= 55% of frame height
-MAX_ZOOM = 1.75                 # ~43% off the sides. Talking-head footage centres
+MAX_ZOOM = 1.60                 # ~43% off the sides. Talking-head footage centres
                                 # the subject, so this is nearly always room -- but
                                 # it is a hard stop so a wide shot cannot lose its
                                 # subject entirely.

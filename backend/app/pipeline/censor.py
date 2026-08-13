@@ -25,6 +25,7 @@ _STEMS = (
 _EXACT = {
     "chutiya", "chutiye", "bhosdike", "bhosdika", "madarchod", "behenchod",
     "bhenchod", "gandu", "gaand", "lauda", "lawda", "randi", "harami",
+    "cutiya", "cuutiya", "lund","laudaa","lundke"
 }
 
 _CLEAN = re.compile(r"[^a-zऀ-ॿ]+")   # keep latin + Devanagari

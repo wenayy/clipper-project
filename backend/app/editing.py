@@ -68,7 +68,9 @@ def ensure_source(job: Job, job_dir: str, on_progress=None) -> str:
         return restored
 
     os.makedirs(job_dir, exist_ok=True)
-    return downloader.download_video(job.url, path, on_progress=on_progress)
+    max_height = (job.options or {}).get("max_video_height", 1080)
+    return downloader.download_video(job.url, path, on_progress=on_progress,
+                                     max_height=max_height)
 
 
 def words_from_lines(lines: list, transcript: dict = None) -> list:
@@ -156,7 +158,8 @@ def rerender_clip(job_id: str, index: int, start: float, end: float,
                   caption_color: str = None, caption_active_color: str = None,
                   captions_on: bool = True,
                   title_style: str = None, title_font: str = None,
-                  tighten_pauses: bool = None):
+                  tighten_pauses: bool = None,
+                  template_override: str = None):
     """Re-cuts clip `index` of `job_id` to [start, end]. Returns the updated clip.
 
     `caption_style` overrides the template's caption look for this clip only.
@@ -186,7 +189,8 @@ def rerender_clip(job_id: str, index: int, start: float, end: float,
             raise ValueError("Start time cannot be negative.")
 
         options = job.options or {}
-        tpl = templates.get(options.get("template", "classic"), templates["classic"])
+        tpl_key = template_override or options.get("template", "classic")
+        tpl = templates.get(tpl_key, templates["classic"])
         ratio = ratio or options.get("ratio", "9:16")
         job_dir = os.path.join(storage_dir, job_id)
 
@@ -218,10 +222,13 @@ def rerender_clip(job_id: str, index: int, start: float, end: float,
             # An explicit position from the editor wins over the automatic
             # placement -- the user dragged it there on purpose.
             margin_v = render.caption_margin_from_position(out_h, caption_pos)
+            lock_margin = True
         elif tpl["frame"] == "gameplay":
             margin_v = render.split_caption_margin_v(out_h)
+            lock_margin = True
         elif reframe_plan:
             margin_v = render.smart_caption_margin_v(reframe_plan, out_h)
+            lock_margin = True
         else:
             # These frames put the video somewhere other than the middle, so the
             # generic margin strands captions in the wrong band. main.py has
@@ -231,6 +238,7 @@ def rerender_clip(job_id: str, index: int, start: float, end: float,
                      "fit": render.fit_caption_margin_v}.get(
                          tpl["frame"], render.caption_margin_v)
             margin_v = place(src_w, src_h, out_w, out_h)
+            lock_margin = False
         size_px = caption_size or None
 
         # Re-cut the dead air, exactly as the first render did.
@@ -296,7 +304,8 @@ def rerender_clip(job_id: str, index: int, start: float, end: float,
                                           size_px=size_px, animation=caption_anim,
                                           color=caption_color,
                                           active_color=caption_active_color,
-                                          title_style=title_style, title_font=title_font)
+                                          title_style=title_style, title_font=title_font,
+                                          lock_margin=lock_margin)
             else:
                 subtitles.build_ass(caption_words, caption_offset, subtitle_path, margin_v,
                                     style=style, play_res=(out_w, out_h),
@@ -304,7 +313,8 @@ def rerender_clip(job_id: str, index: int, start: float, end: float,
                                     font=caption_font, size_px=size_px, animation=caption_anim,
                                     color=caption_color,
                                     active_color=caption_active_color,
-                                    title_style=title_style, title_font=title_font)
+                                    title_style=title_style, title_font=title_font,
+                                    lock_margin=lock_margin)
 
         out_name = f"clip_{index + 1}.mp4"
         final_path = os.path.join(job_dir, out_name)

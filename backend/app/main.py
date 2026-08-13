@@ -969,11 +969,13 @@ def job_gameplay(job_id: str, request: Request):
     if not tpl or tpl["frame"] != "gameplay":
         raise HTTPException(status_code=404, detail="This job is not a split-screen job")
 
-    loops = _gameplay_loops()
+    loops = sorted(
+        [os.path.join(GAMEPLAY_DIR, f) for f in os.listdir(GAMEPLAY_DIR)
+         if f.lower().endswith((".mp4", ".mov", ".webm"))],
+    )
     if not loops:
         raise HTTPException(status_code=404, detail="No gameplay assets available")
-    # Same round-robin the renderer uses, so the preview shows THIS clip's loop.
-    path = loops[0]
+    path = loops[hash(job_id) % len(loops)]
     # Detect the actual media type from the file extension.
     ext = os.path.splitext(path)[1].lower()
     media_type = {".webm": "video/webm", ".mp4": "video/mp4"}.get(ext, "video/mp4")
@@ -1135,11 +1137,15 @@ class Overlay(BaseModel):
     opacity: float = 1.0
 
 
+EDITOR_TEMPLATES = {"classic", "fitvideo", "gameplay"}
+
+
 class ClipRecipe(BaseModel):
     """A clip described rather than rendered."""
     start: float
     end: float
     ratio: Optional[str] = None
+    template: Optional[str] = None
     caption_style: Optional[str] = None
     caption_font: Optional[str] = None
     translate_to: Optional[str] = None
@@ -1369,7 +1375,11 @@ def export_clip(job_id: str, index: int,
             ov["path"] = path
         resolved.append(ov)
 
-    tpl = TEMPLATES.get((job.get("options") or {}).get("template", "classic"))
+    tpl_key = (job.get("options") or {}).get("template", "classic")
+    recipe_tpl = recipe.get("template")
+    if recipe_tpl and recipe_tpl in EDITOR_TEMPLATES:
+        tpl_key = recipe_tpl
+    tpl = TEMPLATES.get(tpl_key)
     loops = _gameplay_loops() if tpl and tpl["frame"] == "gameplay" else []
     reservation_id = _reserve_editor_export(job_id, index, user)
     try:
@@ -1397,6 +1407,7 @@ def export_clip(job_id: str, index: int,
                 title_style=recipe.get("title_style"),
                 title_font=recipe.get("title_font"),
                 tighten_pauses=recipe.get("tighten_pauses"),
+                template_override=tpl_key,
             )
         with SessionLocal() as session:
             clip = (session.query(Clip)
@@ -1572,7 +1583,9 @@ def _start_job(req: JobRequest, background_tasks: BackgroundTasks,
     email = user.email if user else None
     options["watermark"] = ("" if billing.allows(plan_id, "no_watermark", email)
                             else billing.WATERMARK_TEXT)
-    options["max_source_minutes"] = billing.limits_for(plan_id, email)["max_source_minutes"]
+    plan_limits = billing.limits_for(plan_id, email)
+    options["max_source_minutes"] = plan_limits["max_source_minutes"]
+    options["max_video_height"] = plan_limits.get("max_video_height", 1080)
     options["retention_until"] = (
         datetime.now(timezone.utc)
         + timedelta(hours=billing.retention_hours_for(plan_id, email))
@@ -1957,6 +1970,7 @@ def _run_pipeline_locked(job_id: str, req: JobRequest, gameplay_loops: list = No
     job_options = (get_job(job_id) or {}).get("options") or {}
     options_watermark = job_options.get("watermark") or None
     max_source_minutes = job_options.get("max_source_minutes") or billing.MAX_SOURCE_MINUTES
+    max_video_height = job_options.get("max_video_height", 1080)
 
     try:
         # Link jobs fetch an audio-only stream first. Uploads already live in
@@ -2102,7 +2116,7 @@ def _run_pipeline_locked(job_id: str, req: JobRequest, gameplay_loops: list = No
             workspace.ensure_space(job_dir, os.path.getsize(video_path))
             update_job(job_id, progress_message="Getting the full video ready...", percent=0)
         else:
-            workspace.ensure_space(job_dir, downloader.estimate_video_bytes(req.url))
+            workspace.ensure_space(job_dir, downloader.estimate_video_bytes(req.url, max_video_height))
             update_job(job_id, progress_message="Getting the full video ready...", percent=0)
             video_path = downloader.download_video(
                 req.url,
@@ -2110,6 +2124,7 @@ def _run_pipeline_locked(job_id: str, req: JobRequest, gameplay_loops: list = No
                 on_progress=lambda p: update_job(
                     job_id, percent=round(p * 0.5), progress_message=f"Getting the full video ready... {p:.0f}%"
                 ),
+                max_height=max_video_height,
             )
 
         # Start the editor proxies NOW, alongside clip rendering, instead of
@@ -2154,6 +2169,7 @@ def _run_pipeline_locked(job_id: str, req: JobRequest, gameplay_loops: list = No
 
             clip_plan = None
             clip_margin_v = margin_v
+            lock_margin = bool(gameplay_loops)
             if tpl["frame"] == "podcast":
                 try:
                     clip_plan = reframe.plan(
@@ -2165,6 +2181,7 @@ def _run_pipeline_locked(job_id: str, req: JobRequest, gameplay_loops: list = No
                 if clip_plan:
                     print(f"[clipper] clip {i}: reframing as {clip_plan['mode']}")
                     clip_margin_v = render.smart_caption_margin_v(clip_plan, out_h)
+                    lock_margin = True
                     cache_path = os.path.join(
                         job_dir,
                         (f"reframe_v{reframe.PLAN_VERSION}_{i - 1}_"
@@ -2208,7 +2225,8 @@ def _run_pipeline_locked(job_id: str, req: JobRequest, gameplay_loops: list = No
                                         play_res=(out_w, out_h),
                                         title=clip.get("title", ""),
                                         keywords=clip.get("keywords"),
-                                        cue_emoji=cue_emoji)
+                                        cue_emoji=cue_emoji,
+                                        lock_margin=lock_margin)
                 end_time = clip["end"]
             else:
                 script_text = voiceover.write_narration_script(

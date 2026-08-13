@@ -17,7 +17,7 @@ two must be produced together or the captions desync.
 """
 
 # Pauses shorter than this are natural speech rhythm and get left alone.
-DEFAULT_MAX_PAUSE = 0.35
+DEFAULT_MAX_PAUSE = 0.45
 
 # Podcasts need breathing room. A 350 ms gap in a monologue is often emphasis,
 # and cutting every one of those gaps creates a machine-gun sequence of jump

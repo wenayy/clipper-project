@@ -418,7 +418,7 @@ def _run_with_progress(cmd: list, on_progress=None, _retrying: bool = False) -> 
         raise RuntimeError(_public_failure(log))
 
 
-def estimate_video_bytes(url: str) -> int:
+def estimate_video_bytes(url: str, max_height: int = 1080) -> int:
     """Approximate download size for the video formats we actually select.
 
     Used to fail fast with a readable message when the disk is too full, rather
@@ -428,7 +428,7 @@ def estimate_video_bytes(url: str) -> int:
     """
     try:
         out = subprocess.run(
-            ["yt-dlp", "-f", VIDEO_FORMAT, "--no-playlist", "-J", "--no-warnings",
+            ["yt-dlp", "-f", _video_format(max_height), "--no-playlist", "-J", "--no-warnings",
              *_cookie_args(), url],
             capture_output=True, text=True, timeout=120,
         )
@@ -553,11 +553,21 @@ def download_audio(url: str, out_path: str, on_progress=None) -> str:
     return out_path
 
 
-def download_video(url: str, out_path: str, on_progress=None) -> str:
+def _video_format(max_height: int = 1080) -> str:
+    h = max_height
+    return (
+        f"bestvideo[height<={h}][vcodec^=avc1]+bestaudio[ext=m4a]/"
+        f"bestvideo[height<={h}]+bestaudio/"
+        f"best[height<={h}]/best"
+    )
+
+
+def download_video(url: str, out_path: str, on_progress=None,
+                   max_height: int = 1080) -> str:
     _run_with_progress(
         [
             "yt-dlp",
-            "-f", VIDEO_FORMAT,
+            "-f", _video_format(max_height),
             "--merge-output-format", "mp4",
             "--newline",
             "--no-playlist",

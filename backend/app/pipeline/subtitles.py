@@ -13,7 +13,7 @@ word so the active word can be highlighted as it is spoken.
 """
 
 # --- caption feel -------------------------------------------------------------
-MAX_WORDS_PER_CUE = 4          # keep lines short enough to read in a glance
+MAX_WORDS_PER_CUE = 3          # keep lines short enough to read in a glance
 
 # Caption sizes are px on the 1080x1920 reference canvas -- the same number the
 # editor shows. Bounds keep text readable without swallowing the frame.
@@ -560,12 +560,13 @@ def _active_override(st: dict, word_index: int = 0) -> str:
 
 
 def _header(margin_v: int, st: dict, play_res: tuple,
-            title_style: str = None, title_font: str = None) -> str:
+            title_style: str = None, title_font: str = None,
+            lock_margin: bool = False) -> str:
     res_x, res_y = play_res
     ts = title_look(title_style, title_font)
     pos = POSITIONS.get(st.get("position", "bottom"), POSITIONS["bottom"])
     alignment = pos["alignment"]
-    if "margin_frac" in pos:
+    if "margin_frac" in pos and not lock_margin:
         margin_v = int(res_y * pos["margin_frac"])
 
     box = st.get("box", "none")
@@ -816,7 +817,8 @@ def build_ass(words: list, clip_start_time: float, out_path: str,
               animation: str = None,
               color: str = None, active_color: str = None,
               title_style: str = None, title_font: str = None,
-              cue_emoji: dict = None) -> str:
+              cue_emoji: dict = None,
+              lock_margin: bool = False) -> str:
     """Writes an ASS file whose timings are relative to the clip's own start.
 
     words:           Deepgram word objects with absolute 'start'/'end' seconds
@@ -844,7 +846,8 @@ def build_ass(words: list, clip_start_time: float, out_path: str,
     if _is_devanagari(title or ""):
         title = _romanize(title)
 
-    lines = [_header(margin_v, st, play_res, title_style, title_font)]
+    lines = [_header(margin_v, st, play_res, title_style, title_font,
+                     lock_margin=lock_margin)]
     lines.append(_title_events(title, play_res, title_style))
 
     # Keywords stay coloured for the whole cue, independent of the karaoke
@@ -988,7 +991,8 @@ def build_ass_lines(caption_lines: list, out_path: str,
                     title: str = "", font: str = None, size_px: int = None,
                     animation: str = None,
                     color: str = None, active_color: str = None,
-                    title_style: str = None, title_font: str = None) -> str:
+                    title_style: str = None, title_font: str = None,
+                    lock_margin: bool = False) -> str:
     """Whole-line captions with no karaoke, for translated subtitles.
 
     A translation has different words with different lengths from the speech,
@@ -1013,7 +1017,8 @@ def build_ass_lines(caption_lines: list, out_path: str,
     if _is_devanagari(title or ""):
         title = _romanize(title)
 
-    out = [_header(margin_v, st, play_res, title_style, title_font),
+    out = [_header(margin_v, st, play_res, title_style, title_font,
+                   lock_margin=lock_margin),
            _title_events(title, play_res, title_style)]
     for line in caption_lines:
         text = _escape((line.get("text") or "").strip())
