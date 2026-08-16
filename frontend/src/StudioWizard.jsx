@@ -285,6 +285,9 @@ export default function StudioWizard({
               <ToggleChip label="Captions" on={prefs.burnSubtitles}
                           onChange={prefs.setBurnSubtitles} testid="opt-captions"
                           title="Word-timed captions burned into the video" />
+              <ToggleChip label="Title" on={prefs.burnTitle}
+                          onChange={prefs.setBurnTitle} testid="opt-title"
+                          title="Burn a title card into the first few seconds of each clip" />
               <ToggleChip label="Auto-censor" on={prefs.autoCensor}
                           onChange={prefs.setAutoCensor} testid="opt-censor"
                           title="Mutes profanity and stars it in captions, so clips stay monetisable" />
@@ -415,6 +418,7 @@ export default function StudioWizard({
             <Row label="Captions" value={prefs.burnSubtitles
               ? (captionData?.presets?.find((p) => p.id === prefs.captionStyle)?.name || "On")
               : "Off"} />
+            <Row label="Title" value={prefs.burnTitle ? "On" : "Off"} />
             <Row label="Auto-censor" value={prefs.autoCensor ? "On" : "Off"} />
             <Row label="Tighten pauses"
                  value={prefs.tightenPauses && can("tighten_pauses") ? "On" : "Off"}

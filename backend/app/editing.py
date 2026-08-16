@@ -158,6 +158,7 @@ def rerender_clip(job_id: str, index: int, start: float, end: float,
                   caption_color: str = None, caption_active_color: str = None,
                   captions_on: bool = True,
                   title_style: str = None, title_font: str = None,
+                  title_size: int = None,
                   tighten_pauses: bool = None,
                   template_override: str = None):
     """Re-cuts clip `index` of `job_id` to [start, end]. Returns the updated clip.
@@ -270,6 +271,7 @@ def rerender_clip(job_id: str, index: int, start: float, end: float,
         style = (caption_style or (job.options or {}).get("caption_style")
                  or (job.options or {}).get("caption_style_override")
                  or tpl["caption_style"])
+        print(f"[clipper] export caption_style={caption_style!r} → resolved={style!r}, captions_on={captions_on}, title={clip.title!r}, title_size={title_size!r}, title_style={title_style!r}")
 
         # Segments rebase the clip to zero, so the caption offset has to follow.
         caption_offset = 0.0 if segments else start
@@ -278,14 +280,11 @@ def rerender_clip(job_id: str, index: int, start: float, end: float,
                                      if options.get("auto_censor", True) and words
                                      else (words, None))
 
+        has_title = (clip.title or "").strip() and title_style != "none"
         subtitle_path = None
-        if (captions_on and options.get("burn_subtitles", True)
-                and caption_words):
+        if captions_on and caption_words:
             subtitle_path = os.path.join(job_dir, f"clip_{index + 1}.ass")
             if translate_to:
-                # Translated subtitles: whole lines on the original utterance
-                # spans, since word-karaoke cannot survive translation. Audio
-                # stays original -- the censor mute spans still apply.
                 utt_lines = []
                 for u in transcriber.get_utterances(job.transcript):
                     if u["end"] > start and u["start"] < end:
@@ -294,7 +293,7 @@ def rerender_clip(job_id: str, index: int, start: float, end: float,
                             "end": min(u["end"], end) - start,
                             "text": u["transcript"],
                         })
-                if caption_lines:   # user edits win over the raw transcript
+                if caption_lines:
                     utt_lines = [{"start": l["start"] - start, "end": l["end"] - start,
                                   "text": l["text"]} for l in caption_lines]
                 translated = translation.translate_lines(utt_lines, translate_to)
@@ -305,6 +304,7 @@ def rerender_clip(job_id: str, index: int, start: float, end: float,
                                           color=caption_color,
                                           active_color=caption_active_color,
                                           title_style=title_style, title_font=title_font,
+                                          title_size=title_size,
                                           lock_margin=lock_margin)
             else:
                 subtitles.build_ass(caption_words, caption_offset, subtitle_path, margin_v,
@@ -314,7 +314,16 @@ def rerender_clip(job_id: str, index: int, start: float, end: float,
                                     color=caption_color,
                                     active_color=caption_active_color,
                                     title_style=title_style, title_font=title_font,
+                                    title_size=title_size,
                                     lock_margin=lock_margin)
+        elif has_title:
+            subtitle_path = os.path.join(job_dir, f"clip_{index + 1}.ass")
+            subtitles.build_ass([], 0.0, subtitle_path, margin_v,
+                                style=style, play_res=(out_w, out_h),
+                                title=clip.title or "",
+                                title_style=title_style, title_font=title_font,
+                                title_size=title_size,
+                                lock_margin=lock_margin)
 
         out_name = f"clip_{index + 1}.mp4"
         final_path = os.path.join(job_dir, out_name)
@@ -346,6 +355,16 @@ def rerender_clip(job_id: str, index: int, start: float, end: float,
             # mark from every clip a lapsed subscriber re-exports.
             watermark=options.get("watermark") or None,
         )
+        if not os.path.exists(tmp_path) or os.path.getsize(tmp_path) < 1024:
+            raise RuntimeError("Render produced no usable output file")
+        import subprocess as _sp
+        probe = _sp.run(
+            ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+             "-of", "csv=p=0", tmp_path],
+            capture_output=True, text=True, timeout=10)
+        if probe.returncode != 0 or not probe.stdout.strip().replace(".", "").isdigit():
+            os.unlink(tmp_path)
+            raise RuntimeError("Render produced a corrupt file; original clip preserved")
         os.replace(tmp_path, final_path)
         # The edit is only real once it is in storage. Skipping this left the
         # new version on one container's disk while every other request -- and

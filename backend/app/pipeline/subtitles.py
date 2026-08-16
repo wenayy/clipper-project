@@ -561,9 +561,10 @@ def _active_override(st: dict, word_index: int = 0) -> str:
 
 def _header(margin_v: int, st: dict, play_res: tuple,
             title_style: str = None, title_font: str = None,
+            title_size: int = None,
             lock_margin: bool = False) -> str:
     res_x, res_y = play_res
-    ts = title_look(title_style, title_font)
+    ts = title_look(title_style, title_font, title_size)
     pos = POSITIONS.get(st.get("position", "bottom"), POSITIONS["bottom"])
     alignment = pos["alignment"]
     if "margin_frac" in pos and not lock_margin:
@@ -657,7 +658,7 @@ TITLE_LOOKS = {
 DEFAULT_TITLE_LOOK = "plate"
 
 
-def title_look(name: str = None, font: str = None) -> dict:
+def title_look(name: str = None, font: str = None, size: int = None) -> dict:
     """Resolve a title look, with the font overridable independently.
 
     Look and typeface are separate choices: the same white plate reads very
@@ -668,7 +669,7 @@ def title_look(name: str = None, font: str = None) -> dict:
     return {
         **look,
         "font": resolve_font(font) or TITLE_STYLE["font"],
-        "size": TITLE_STYLE["size"],
+        "size": size or TITLE_STYLE["size"],
     }
 
 
@@ -817,6 +818,7 @@ def build_ass(words: list, clip_start_time: float, out_path: str,
               animation: str = None,
               color: str = None, active_color: str = None,
               title_style: str = None, title_font: str = None,
+              title_size: int = None,
               cue_emoji: dict = None,
               lock_margin: bool = False) -> str:
     """Writes an ASS file whose timings are relative to the clip's own start.
@@ -847,7 +849,7 @@ def build_ass(words: list, clip_start_time: float, out_path: str,
         title = _romanize(title)
 
     lines = [_header(margin_v, st, play_res, title_style, title_font,
-                     lock_margin=lock_margin)]
+                     title_size=title_size, lock_margin=lock_margin)]
     lines.append(_title_events(title, play_res, title_style))
 
     # Keywords stay coloured for the whole cue, independent of the karaoke
@@ -992,6 +994,7 @@ def build_ass_lines(caption_lines: list, out_path: str,
                     animation: str = None,
                     color: str = None, active_color: str = None,
                     title_style: str = None, title_font: str = None,
+                    title_size: int = None,
                     lock_margin: bool = False) -> str:
     """Whole-line captions with no karaoke, for translated subtitles.
 
@@ -1018,7 +1021,7 @@ def build_ass_lines(caption_lines: list, out_path: str,
         title = _romanize(title)
 
     out = [_header(margin_v, st, play_res, title_style, title_font,
-                   lock_margin=lock_margin),
+                   title_size=title_size, lock_margin=lock_margin),
            _title_events(title, play_res, title_style)]
     for line in caption_lines:
         text = _escape((line.get("text") or "").strip())

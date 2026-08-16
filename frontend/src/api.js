@@ -36,7 +36,7 @@ function authHeaders() {
 }
 
 
-export async function submitJob({ url, nClips, mode, burnSubtitles, autoCensor, multilingual, tightenPauses, voice, language, template, captionStyle, ratio, lengthPref, intent, highQuality, advancedModel }) {
+export async function submitJob({ url, nClips, mode, burnSubtitles, burnTitle, autoCensor, multilingual, tightenPauses, voice, language, template, captionStyle, ratio, lengthPref, intent, highQuality, advancedModel }) {
   const resp = await fetch(`${API_BASE}/jobs`, {
     method: "POST",
     headers: { "Content-Type": "application/json", ...authHeaders() },
@@ -45,6 +45,7 @@ export async function submitJob({ url, nClips, mode, burnSubtitles, autoCensor, 
       n_clips: nClips,
       mode,
       burn_subtitles: burnSubtitles,
+      burn_title: burnTitle !== false,
       auto_censor: autoCensor !== false,
       multilingual: multilingual === true,
       tighten_pauses: tightenPauses === true,
@@ -347,8 +348,19 @@ export async function uploadOverlayImage(jobId, file) {
   return resp.json();
 }
 
-export function gameplayUrl(jobId) {
+export function gameplayUrl(jobId, file) {
+  if (file) return `${API_BASE}/jobs/${jobId}/gameplay?file=${encodeURIComponent(file)}`;
   return `${API_BASE}/jobs/${jobId}/gameplay`;
+}
+
+export function gameplayFileUrl(filename) {
+  return `${API_BASE}/gameplay-file/${encodeURIComponent(filename)}`;
+}
+
+export async function getGameplayList() {
+  const resp = await fetch(`${API_BASE}/gameplay-list`);
+  if (!resp.ok) throw new Error("Could not load gameplay list");
+  return resp.json();
 }
 
 /* Fonts, animations and speed range come from the renderer, so a .ttf dropped

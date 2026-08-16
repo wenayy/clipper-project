@@ -83,7 +83,7 @@ GAMEPLAY_DIR = os.path.join(os.path.dirname(__file__), "..", "assets", "gameplay
 
 # Uploads are streamed to disk, never read into RAM. Keep this configurable for
 # a production host with object storage or a stricter reverse-proxy limit.
-MAX_UPLOAD_BYTES = int(os.environ.get("CLIPPER_MAX_UPLOAD_BYTES", 1024 * 1024 * 1024))
+MAX_UPLOAD_BYTES = int(os.environ.get("CLIPPER_MAX_UPLOAD_BYTES", 4 * 1024 * 1024 * 1024))
 VIDEO_UPLOAD_EXTENSIONS = {".mp4", ".mov", ".m4v", ".webm", ".mkv"}
 
 # How many renders may run at once in THIS process.
@@ -276,6 +276,17 @@ def list_templates():
     return [{"id": k, **v} for k, v in TEMPLATES.items()]
 
 
+@app.get("/gameplay-list")
+def list_gameplay():
+    """Available gameplay files for the editor picker."""
+    try:
+        files = sorted(f for f in os.listdir(GAMEPLAY_DIR)
+                       if f.lower().endswith((".mp4", ".mov", ".webm")))
+    except FileNotFoundError:
+        files = []
+    return [{"file": f, "name": os.path.splitext(f)[0]} for f in files]
+
+
 def _gameplay_loops() -> list:
     """All installed gameplay assets, shuffled. Raises with setup instructions.
 
@@ -306,6 +317,7 @@ class JobRequest(BaseModel):
     voice: str = "onyx"
     language: str = "English"
     burn_subtitles: bool = True
+    burn_title: bool = True
     template: str = "classic"       # key into TEMPLATES
     caption_style: str = "karaoke_fill"  # independent of the frame layout
     ratio: str = "9:16"             # key into render.RATIOS
@@ -958,25 +970,22 @@ def job_transcript(job_id: str):
     }
 
 
-@app.api_route("/jobs/{job_id}/gameplay", methods=["GET", "HEAD"])
-def job_gameplay(job_id: str, request: Request):
-    """The gameplay loop this job renders with, so the editor can show the
-    split-screen composition instead of the bare source."""
-    job = get_job(job_id)
-    if not job:
-        raise HTTPException(status_code=404, detail="Job not found")
-    tpl = TEMPLATES.get((job.get("options") or {}).get("template", "classic"))
-    if not tpl or tpl["frame"] != "gameplay":
-        raise HTTPException(status_code=404, detail="This job is not a split-screen job")
+def _serve_gameplay_file(filename: str | None, job_id: str | None, request: Request):
+    """Shared range-serving logic for gameplay endpoints."""
+    if filename:
+        safe = os.path.basename(filename)
+        path = os.path.join(GAMEPLAY_DIR, safe)
+        if not os.path.exists(path):
+            raise HTTPException(status_code=404, detail="Gameplay file not found")
+    else:
+        loops = sorted(
+            [os.path.join(GAMEPLAY_DIR, f) for f in os.listdir(GAMEPLAY_DIR)
+             if f.lower().endswith((".mp4", ".mov", ".webm"))],
+        )
+        if not loops:
+            raise HTTPException(status_code=404, detail="No gameplay assets available")
+        path = loops[hash(job_id) % len(loops)]
 
-    loops = sorted(
-        [os.path.join(GAMEPLAY_DIR, f) for f in os.listdir(GAMEPLAY_DIR)
-         if f.lower().endswith((".mp4", ".mov", ".webm"))],
-    )
-    if not loops:
-        raise HTTPException(status_code=404, detail="No gameplay assets available")
-    path = loops[hash(job_id) % len(loops)]
-    # Detect the actual media type from the file extension.
     ext = os.path.splitext(path)[1].lower()
     media_type = {".webm": "video/webm", ".mp4": "video/mp4"}.get(ext, "video/mp4")
     size = os.path.getsize(path)
@@ -986,7 +995,6 @@ def job_gameplay(job_id: str, request: Request):
                         headers={"Accept-Ranges": "bytes",
                                  "Content-Length": str(size)})
 
-    # Range support -- without it the browser's video player gets 416 on seek.
     range_header = request.headers.get("range")
     if not range_header:
         return FileResponse(path, media_type=media_type,
@@ -1025,6 +1033,26 @@ def job_gameplay(job_id: str, request: Request):
             "Content-Length": str(end - start + 1),
         },
     )
+
+
+@app.api_route("/gameplay-file/{filename}", methods=["GET", "HEAD"])
+def serve_gameplay_file(filename: str, request: Request):
+    """Serve a specific gameplay file by name (for the editor picker preview)."""
+    return _serve_gameplay_file(filename, None, request)
+
+
+@app.api_route("/jobs/{job_id}/gameplay", methods=["GET", "HEAD"])
+def job_gameplay(job_id: str, request: Request, file: str = None):
+    """The gameplay loop this job renders with, so the editor can show the
+    split-screen composition instead of the bare source."""
+    job = get_job(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    tpl = TEMPLATES.get((job.get("options") or {}).get("template", "classic"))
+    if not tpl or tpl["frame"] != "gameplay":
+        raise HTTPException(status_code=404, detail="This job is not a split-screen job")
+
+    return _serve_gameplay_file(file, job_id, request)
 
 
 @app.api_route("/jobs/{job_id}/preview", methods=["GET", "HEAD"])
@@ -1170,6 +1198,8 @@ class ClipRecipe(BaseModel):
     # in Anton than in Merriweather.
     title_style: Optional[str] = None       # key into subtitles.TITLE_LOOKS
     title_font: Optional[str] = None        # font id, independent of captions
+    title_size: Optional[int] = None        # px on the 1080x1920 reference canvas
+    gameplay_file: Optional[str] = None     # filename in assets/gameplay/
 
 
 CAPTION_RECIPE_DEFAULTS = {
@@ -1380,7 +1410,13 @@ def export_clip(job_id: str, index: int,
     if recipe_tpl and recipe_tpl in EDITOR_TEMPLATES:
         tpl_key = recipe_tpl
     tpl = TEMPLATES.get(tpl_key)
-    loops = _gameplay_loops() if tpl and tpl["frame"] == "gameplay" else []
+    chosen_gameplay = recipe.get("gameplay_file")
+    if tpl and tpl["frame"] == "gameplay" and chosen_gameplay:
+        safe = os.path.basename(chosen_gameplay)
+        gp = os.path.join(GAMEPLAY_DIR, safe)
+        loops = [gp] if os.path.exists(gp) else _gameplay_loops()
+    else:
+        loops = _gameplay_loops() if tpl and tpl["frame"] == "gameplay" else []
     reservation_id = _reserve_editor_export(job_id, index, user)
     try:
         # Renders on the request thread, so it competes for memory with any
@@ -1406,6 +1442,7 @@ def export_clip(job_id: str, index: int,
                 background=recipe.get("background"),
                 title_style=recipe.get("title_style"),
                 title_font=recipe.get("title_font"),
+                title_size=recipe.get("title_size"),
                 tighten_pauses=recipe.get("tighten_pauses"),
                 template_override=tpl_key,
             )
@@ -2211,6 +2248,7 @@ def _run_pipeline_locked(job_id: str, req: JobRequest, gameplay_loops: list = No
                     print(f"[clipper] clip {i}: muted {len(mute_spans)} word(s)")
 
             if req.mode == "original":
+                clip_title = clip.get("title", "") if req.burn_title else ""
                 if req.burn_subtitles and clip_words:
                     subtitle_path = os.path.join(job_dir, f"clip_{i}.ass")
                     caption_preset_id = caption_presets.get(req.caption_style)["id"]
@@ -2223,9 +2261,18 @@ def _run_pipeline_locked(job_id: str, req: JobRequest, gameplay_loops: list = No
                                         clip_margin_v,
                                         style=caption_preset_id,
                                         play_res=(out_w, out_h),
-                                        title=clip.get("title", ""),
+                                        title=clip_title,
                                         keywords=clip.get("keywords"),
                                         cue_emoji=cue_emoji,
+                                        lock_margin=lock_margin)
+                elif clip_title.strip():
+                    subtitle_path = os.path.join(job_dir, f"clip_{i}.ass")
+                    caption_preset_id = caption_presets.get(req.caption_style)["id"]
+                    subtitles.build_ass([], 0.0, subtitle_path,
+                                        clip_margin_v,
+                                        style=caption_preset_id,
+                                        play_res=(out_w, out_h),
+                                        title=clip_title,
                                         lock_margin=lock_margin)
                 end_time = clip["end"]
             else:

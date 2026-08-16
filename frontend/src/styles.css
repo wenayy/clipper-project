@@ -4163,6 +4163,12 @@ body::after {
   color: var(--ink-faint);
   margin-right: 2px;
 }
+.ctl-value {
+  font-size: 11px;
+  color: var(--ink-faint);
+  min-width: 38px;
+  text-align: right;
+}
 
 .chip-btn {
   font: inherit;
@@ -4181,6 +4187,52 @@ body::after {
   border-color: var(--violet);
   color: var(--violet);
   background: rgba(109, 40, 217, 0.07);
+}
+
+/* Gameplay picker — horizontal strip of video thumbnails */
+.gameplay-picker {
+  display: flex;
+  gap: 8px;
+  overflow-x: auto;
+  padding: 4px 0;
+  scrollbar-width: thin;
+}
+.gameplay-thumb {
+  flex: 0 0 auto;
+  width: 80px;
+  border: 2px solid var(--line);
+  border-radius: 8px;
+  overflow: hidden;
+  cursor: pointer;
+  background: var(--surface);
+  padding: 0;
+  transition: border-color 0.15s;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+}
+.gameplay-thumb video {
+  width: 80px;
+  height: 50px;
+  object-fit: cover;
+  display: block;
+  pointer-events: none;
+}
+.gameplay-thumb:hover { border-color: var(--ink-faint); }
+.gameplay-thumb:hover video { pointer-events: auto; }
+.gameplay-thumb.on {
+  border-color: var(--violet);
+  box-shadow: 0 0 0 1px var(--violet);
+}
+.gameplay-thumb-name {
+  font-size: 10px;
+  color: var(--ink-faint);
+  padding: 2px 4px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 76px;
+  text-align: center;
 }
 
 .live-foot { padding: 16px 28px 40px; }

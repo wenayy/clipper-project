@@ -23,12 +23,9 @@ import urllib.request
 # "[download]  46.3% of ..." -- yt-dlp emits one of these per line with --newline
 _PERCENT_RE = re.compile(r"\[download\]\s+([\d.]+)%")
 
-# <=1080p, h264 preferred, falling back progressively so odd sources still work
-VIDEO_FORMAT = (
-    "bestvideo[height<=1080][vcodec^=avc1]+bestaudio[ext=m4a]/"
-    "bestvideo[height<=1080]+bestaudio/"
-    "best[height<=1080]/best"
-)
+# Height cap applied via -S res:N instead of -f filters so yt-dlp's JS
+# challenge solver runs unimpeded. This constant is kept for reference only.
+VIDEO_FORMAT = "bestvideo[height<=1080]+bestaudio/best[height<=1080]/best"
 
 AUDIO_FORMAT = "bestaudio[ext=m4a]/bestaudio/best"
 
@@ -428,7 +425,7 @@ def estimate_video_bytes(url: str, max_height: int = 1080) -> int:
     """
     try:
         out = subprocess.run(
-            ["yt-dlp", "-f", _video_format(max_height), "--no-playlist", "-J", "--no-warnings",
+            ["yt-dlp", "-S", f"res:{max_height}", "--no-playlist", "-J", "--no-warnings",
              *_cookie_args(), url],
             capture_output=True, text=True, timeout=120,
         )
@@ -528,19 +525,39 @@ def inspect_url(url: str) -> dict:
 def download_audio(url: str, out_path: str, on_progress=None) -> str:
     """Grabs the audio stream only and transcodes it to 16kHz mono mp3 for Deepgram."""
     raw_path = out_path + ".src"
-    _run_with_progress(
-        [
-            "yt-dlp",
-            "-f", AUDIO_FORMAT,
-            "--newline",
-            "--no-playlist",
-            "--force-overwrites",
-            *_cookie_args(),
-            "-o", raw_path,
-            url,
-        ],
-        on_progress,
-    )
+    try:
+        _run_with_progress(
+            [
+                "yt-dlp",
+                "-f", AUDIO_FORMAT,
+                "--newline",
+                "--no-playlist",
+                "--force-overwrites",
+                *_cookie_args(),
+                "-o", raw_path,
+                url,
+            ],
+            on_progress,
+        )
+    except RuntimeError:
+        # Default format selection gets 403'd when YouTube flags the IP.
+        # The android client still serves format 18 (360p combined) reliably;
+        # audio quality does not matter here since we transcode to 16kHz mono.
+        print("[clipper] audio download failed, retrying with android client")
+        _run_with_progress(
+            [
+                "yt-dlp",
+                "--extractor-args", "youtube:player_client=android",
+                "-x",
+                "--newline",
+                "--no-playlist",
+                "--force-overwrites",
+                *_cookie_args(),
+                "-o", raw_path,
+                url,
+            ],
+            on_progress,
+        )
   
     
 
@@ -556,7 +573,6 @@ def download_audio(url: str, out_path: str, on_progress=None) -> str:
 def _video_format(max_height: int = 1080) -> str:
     h = max_height
     return (
-        f"bestvideo[height<={h}][vcodec^=avc1]+bestaudio[ext=m4a]/"
         f"bestvideo[height<={h}]+bestaudio/"
         f"best[height<={h}]/best"
     )
@@ -564,10 +580,34 @@ def _video_format(max_height: int = 1080) -> str:
 
 def download_video(url: str, out_path: str, on_progress=None,
                    max_height: int = 1080) -> str:
+    # Try the default client first — it gets the best quality and works when
+    # the IP is not flagged by YouTube.
+    try:
+        _run_with_progress(
+            [
+                "yt-dlp",
+                "--merge-output-format", "mp4",
+                "--newline",
+                "--no-playlist",
+                "--force-overwrites",
+                *_cookie_args(),
+                "-o", out_path,
+                url,
+            ],
+            on_progress,
+        )
+        return out_path
+    except RuntimeError:
+        pass
+
+    # Default failed (usually HTTP 403 from a flagged IP). The android client
+    # still serves format 18 (360p combined) without needing a PO token or
+    # cookies. Lower quality, but a working clip beats a failed job.
+    print("[clipper] video download failed, retrying with android client")
     _run_with_progress(
         [
             "yt-dlp",
-            "-f", _video_format(max_height),
+            "--extractor-args", "youtube:player_client=android",
             "--merge-output-format", "mp4",
             "--newline",
             "--no-playlist",

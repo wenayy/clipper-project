@@ -447,7 +447,7 @@ function DropZone({ file, onFile, disabled }) {
       }}
     >
       <input ref={inputRef} type="file" disabled={disabled}
-             accept="video/mp4,video/quicktime,video/x-m4v,video/webm,video/x-matroska"
+             accept="video/mp4,video/quicktime,video/x-m4v,video/webm,video/x-matroska,.mp4,.mov,.m4v,.webm,.mkv"
              onChange={(e) => take(e.target.files)} data-testid="dropzone-input" />
       <span className="dropzone-icon" aria-hidden="true">
         <svg viewBox="0 0 24 24" width="20" height="20" fill="none">
@@ -524,6 +524,7 @@ export default function App() {
   const [uploadDuration, setUploadDuration] = useState(null);
   const [nClips, setNClips] = useState(3);
   const [burnSubtitles, setBurnSubtitles] = useState(true);
+  const [burnTitle, setBurnTitle] = useState(true);
   const [autoCensor, setAutoCensor] = useState(true);
   const [multilingual, setMultilingual] = useState(false);
   const [template, setTemplate] = useState("classic");
@@ -891,6 +892,7 @@ export default function App() {
         nClips,
         mode: "original",
         burnSubtitles,
+        burnTitle,
         autoCensor,
         // Never send a gated flag on a plan that does not include it: the server
         // rejects the whole job rather than quietly downgrading it.
@@ -912,6 +914,7 @@ export default function App() {
             n_clips: options.nClips,
             mode: options.mode,
             burn_subtitles: options.burnSubtitles,
+            burn_title: options.burnTitle,
             auto_censor: options.autoCensor,
             multilingual: options.multilingual,
             tighten_pauses: options.tightenPauses,
@@ -1429,7 +1432,8 @@ export default function App() {
                 }}
                 prefs={{
                   nClips, setNClips, ratio, setRatio, lengthPref, setLengthPref,
-                  burnSubtitles, setBurnSubtitles, autoCensor, setAutoCensor,
+                  burnSubtitles, setBurnSubtitles, burnTitle, setBurnTitle,
+                  autoCensor, setAutoCensor,
                   multilingual, setMultilingual, tightenPauses, setTightenPauses,
                   template, setTemplate, intent, setIntent,
                   captionStyle, setCaptionStyle,

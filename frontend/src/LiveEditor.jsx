@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { getTranscript, saveClipEdit, exportClip, previewUrl,
          uploadOverlayImage, overlayImageUrl, gameplayUrl,
-         getClipReframe } from "./api";
+         getClipReframe, getGameplayList, gameplayFileUrl } from "./api";
 import { FontPicker, SizePicker, LanguagePicker, useFonts,
          useTitleStyles, titleLookCss } from "./CaptionToolbar";
 import { useEditHistory } from "./useEditHistory";
@@ -383,13 +383,15 @@ export default function LiveEditor({
     capOn: initial.captions_on ?? (job.options?.burn_subtitles !== false),
     translateTo: initial.translate_to ?? null,
     title: clip.title || "",
-    titleStyle: initial.title_style || "plate",
+    titleStyle: initial.title_style || (job.options?.burn_title === false ? "none" : "plate"),
     titleFont: initial.title_font ?? null,
+    titleSize: initial.title_size ?? null,
     speed: initial.speed ?? 1,
     speedPitched: Boolean(initial.speed_pitched),
     tightenPauses: Boolean(canTightenPauses &&
       (initial.tighten_pauses ?? (job.options?.tighten_pauses === true))),
     background: initial.background || "black",
+    gameplayFile: initial.gameplay_file ?? null,
     overlayList: initial.overlays || [],
     lineEdits: {},
   }), []);   // eslint-disable-line react-hooks/exhaustive-deps
@@ -399,8 +401,8 @@ export default function LiveEditor({
   const {
     start, end, ratio, template, capStyle, capFont, capSize, capPos, capAnim,
     capColor, capActive, capOn,
-    translateTo, title, titleStyle, titleFont, speed, speedPitched, tightenPauses,
-    background,
+    translateTo, title, titleStyle, titleFont, titleSize, speed, speedPitched, tightenPauses,
+    background, gameplayFile,
     overlayList, lineEdits,
   } = doc;
 
@@ -443,11 +445,13 @@ export default function LiveEditor({
   const setTitle = (v) => history.apply({ title: v });
   const setTitleStyle = (v) => history.apply({ titleStyle: v }, { discrete: true });
   const setTitleFont = (v) => history.apply({ titleFont: v }, { discrete: true });
+  const setTitleSize = (v) => history.apply({ titleSize: v }, { discrete: true });
   const setSpeed = (v) => history.apply({ speed: v }, { discrete: true });
   const setSpeedPitched = (v) => history.apply({ speedPitched: v }, { discrete: true });
   const setTightenPauses = (v) =>
     history.apply({ tightenPauses: v }, { discrete: true });
   const setBackground = (v) => history.apply({ background: v }, { discrete: true });
+  const setGameplayFile = (v) => history.apply({ gameplayFile: v }, { discrete: true });
   const setLineEdits = (v, opts = { discrete: true }) =>
     history.apply((p) => ({ ...p, lineEdits: typeof v === "function" ? v(p.lineEdits) : v }),
                   opts);
@@ -524,6 +528,11 @@ export default function LiveEditor({
   const toast = useToast();
   const [exportError, setExportError] = useState("");
   const [status, setStatus] = useState("");
+
+  const [gameplayList, setGameplayList] = useState([]);
+  useEffect(() => {
+    if (isSplit) getGameplayList().then(setGameplayList).catch(() => {});
+  }, [isSplit]);
 
   const videoRef = useRef(null);
   const gameplayRef = useRef(null);
@@ -769,11 +778,13 @@ export default function LiveEditor({
         title: title.trim() || null,
         title_style: titleStyle,
         title_font: titleFont,
+        title_size: titleSize,
         caption_anim: capAnim,
         speed,
         speed_pitched: speedPitched,
         tighten_pauses: tightenPauses,
         background,
+        gameplay_file: gameplayFile,
         lines: Object.keys(lineEdits).length ? lines : null,
         overlays: overlayList.length ? overlayList : null,
       })
@@ -999,6 +1010,43 @@ export default function LiveEditor({
     setStatus("");
     setExportError("");
     try {
+      // Flush the debounced save so the recipe on the server matches what
+      // the editor shows right now. Without this, a style change followed
+      // by a quick Export could render the OLD recipe.
+      clearTimeout(saveTimer.current);
+      const lines = (transcript.utterances || [])
+        .map((u, i) => ({ ...u, i }))
+        .filter((u) => u.end > start && u.start < end)
+        .map((u) => ({
+          start: Math.max(u.start, start),
+          end: Math.min(u.end, end),
+          text: lineEdits[u.i] ?? u.text,
+          edited: lineEdits[u.i] !== undefined,
+        }));
+      await saveClipEdit(job.id, index, {
+        start, end, ratio,
+        template,
+        caption_style: capStyle,
+        caption_font: capFont,
+        caption_size: capSize,
+        caption_pos: capPos,
+        caption_color: capColor,
+        caption_active_color: capActive,
+        captions_on: capOn,
+        translate_to: translateTo,
+        title: title.trim() || null,
+        title_style: titleStyle,
+        title_font: titleFont,
+        title_size: titleSize,
+        caption_anim: capAnim,
+        speed,
+        speed_pitched: speedPitched,
+        tighten_pauses: tightenPauses,
+        background,
+        gameplay_file: gameplayFile,
+        lines: Object.keys(lineEdits).length ? lines : null,
+        overlays: overlayList.length ? overlayList : null,
+      });
       const updated = await exportClip(job.id, index);
       onSaved(index, updated);
       // Rendering is the slow, expensive step -- finishing it deserves more
@@ -1175,7 +1223,7 @@ export default function LiveEditor({
                   />
                   <video
                     ref={gameplayRef}
-                    src={gameplayUrl(job.id)}
+                    src={gameplayUrl(job.id, gameplayFile)}
                     playsInline
                     muted
                     loop
@@ -1264,7 +1312,7 @@ export default function LiveEditor({
                 <div className="stage-title" style={{ top: `${TITLE_TOP * 100}%` }}>
                   <span style={{
                     fontFamily: fontCss(titleFont),
-                    fontSize: `${(TITLE_PX / outW) * 100}cqw`,
+                    fontSize: `${((titleSize ?? TITLE_PX) / outW) * 100}cqw`,
                     ...titleLookCss(titleLook),
                   }}>
                     {title}
@@ -1500,6 +1548,32 @@ export default function LiveEditor({
                       onClick={() => setTemplate(t.id)}>{t.label}</button>
             ))}
           </div>
+          {isSplit && gameplayList.length > 1 && (
+          <div className="ctl">
+            <span className="ctl-label">Gameplay</span>
+            <div className="gameplay-picker">
+              {gameplayList.map((g) => (
+                <button
+                  key={g.file}
+                  className={`gameplay-thumb ${gameplayFile === g.file ? "on" : ""}`}
+                  onClick={() => setGameplayFile(g.file)}
+                  title={g.name}
+                  onMouseEnter={(e) => { const v = e.currentTarget.querySelector("video"); if (v) v.play(); }}
+                  onMouseLeave={(e) => { const v = e.currentTarget.querySelector("video"); if (v) { v.pause(); v.currentTime = 0; } }}
+                >
+                  <video
+                    src={gameplayFileUrl(g.file)}
+                    muted
+                    loop
+                    playsInline
+                    preload="metadata"
+                  />
+                  <span className="gameplay-thumb-name">{g.name}</span>
+                </button>
+              ))}
+            </div>
+          </div>
+          )}
           <div className="ctl">
             <span className="ctl-label">Ratio</span>
             {Object.keys(RATIOS).map((r) => (
@@ -1613,6 +1687,13 @@ export default function LiveEditor({
             <span className="ctl-label">Title font</span>
             <FontPicker value={titleFont} onChange={setTitleFont}
                         needsDevanagari={/[ऀ-ॿ]/.test(title)} />
+          </div>
+          <div className="ctl">
+            <span className="ctl-label">Title size</span>
+            <input type="range" min={40} max={160} step={4}
+                   value={titleSize ?? 92}
+                   onChange={(e) => setTitleSize(Number(e.target.value))} />
+            <span className="ctl-value">{titleSize ?? 92}px</span>
           </div>
         </div>
         )}
