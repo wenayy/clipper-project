@@ -641,6 +641,12 @@ export default function App() {
     async function confirmWithRetry(id, retries = 5) {
       const token = localStorage.getItem("clipper_token");
       if (!token) return null;
+      // The snapshot taken before redirecting (Pricing.jsx). Sending it lets the
+      // server confirm THIS payment by the account actually changing, instead of
+      // falsely reporting success off any other recent grant.
+      let before = null;
+      try { before = JSON.parse(window.sessionStorage.getItem("billingBeforeCheckout") || "null"); }
+      catch { /* private mode: server falls back to the recent-grant check */ }
       for (let i = 0; i <= retries; i++) {
         if (i > 0) await new Promise((r) => setTimeout(r, 2000));
         if (cancelled) return null;
@@ -649,7 +655,7 @@ export default function App() {
             method: "POST",
             headers: { "Content-Type": "application/json",
                        Authorization: `Bearer ${token}` },
-            body: JSON.stringify({ checkout_id: id }),
+            body: JSON.stringify({ checkout_id: id, before }),
           });
           if (!resp.ok) continue;
           const result = await resp.json();

@@ -617,9 +617,12 @@ def checkout(body: CheckoutRequest, user: User = Depends(auth.current_user_requi
         topup["credits"], topup["usd"], user.id, user.email)
     line_item = {"kind": "topup", "credits": topup["credits"], "usd": topup["usd"]}
     if not url:
+        # NB: no `product` in this branch -- it is a local assigned only under
+        # `if body.plan_id:` above, so referencing it here raised
+        # UnboundLocalError and turned every unconfigured top-up into a 500.
         return {"status": "provider_not_configured",
                 "detail": "Checkout is not available for this credit pack yet.",
-                "config_key": product.sku if product else None,
+                "config_key": "topup",
                 "line_item": line_item}
     return {"status": "ready", "checkout_url": url, "line_item": line_item}
 
@@ -637,11 +640,33 @@ def confirm_checkout(body: dict, user: User = Depends(auth.current_user_required
     """
     from app.models import DodoGrant
 
+    before = body.get("before") if isinstance(body, dict) else None
+
     with SessionLocal() as session:
         db_user = session.get(User, user.id)
         if not db_user:
             raise HTTPException(status_code=404, detail="User not found.")
 
+        # Preferred signal: did the account actually change versus the snapshot
+        # the client took just before redirecting to checkout (billingBefore-
+        # Checkout)? This is what tells "THIS payment landed" apart from "an
+        # earlier grant or a renewal is still recent". A bare recent-grant check
+        # cannot: it reports success for a failed or abandoned second payment
+        # whenever any prior purchase or renewal falls inside the window.
+        if isinstance(before, dict) and ("credits" in before or "plan" in before):
+            before_credits = before.get("credits")
+            before_plan = before.get("plan")
+            changed = (
+                (isinstance(before_credits, (int, float))
+                 and db_user.credits > before_credits)
+                or (before_plan is not None and db_user.plan != before_plan)
+            )
+            return {"status": "applied" if changed else "pending",
+                    "credits": db_user.credits, "plan": db_user.plan}
+
+        # Fallback when no snapshot reached us (e.g. private-mode sessionStorage
+        # failed to store it): the original recent-grant heuristic. Looser, but
+        # better than reporting pending forever.
         recent = (session.query(DodoGrant)
                   .filter(DodoGrant.user_id == db_user.id,
                           DodoGrant.created_at >= datetime.now(timezone.utc) - timedelta(minutes=30))

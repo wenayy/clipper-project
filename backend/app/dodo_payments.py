@@ -291,7 +291,11 @@ def _set_subscription(session, user: User, sub_id: str, product_id: str,
     if status in {"active", "trialing", "renewed"}:
         if plan_id:
             user.plan = plan_id
-    elif status in {"cancelled", "canceled", "expired", "failed", "revoked"}:
+    elif status in {"cancelled", "canceled", "expired", "failed",
+                    "revoked", "on_hold"}:
+        # on_hold means a renewal charge failed -- the paid period has lapsed, so
+        # the entitlement must end too, or the user keeps the plan for free until
+        # some later cancel/expire event arrives. _SUB_END routes it here.
         other = (session.query(DodoSubscription)
                  .filter(DodoSubscription.user_id == user.id,
                          DodoSubscription.id != sub_id,
