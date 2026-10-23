@@ -22,6 +22,7 @@ import os
 
 from sqlalchemy.exc import IntegrityError
 
+from app import billing
 from app.db import SessionLocal
 from app.jobs import extend_user_retention
 from app.models import (CreditLedger, DodoGrant, DodoSubscription,
@@ -201,6 +202,41 @@ def _subscription_id(data: dict) -> str | None:
         data.get("id") if data.get("payload_type") == "Subscription" else None)
 
 
+def _paid_cents(data: dict) -> int | None:
+    """What was actually settled, in the smallest currency unit (cents).
+
+    The checkout creates the charge at `usd * 100` (see create_topup_checkout),
+    so the webhook reports the same integer back here.
+    """
+    for key in ("total_amount", "settlement_amount", "amount"):
+        val = data.get(key)
+        if isinstance(val, (int, float)) and val > 0:
+            return int(val)
+    return None
+
+
+def _credits_for_payment(data: dict) -> int:
+    """Credits a top-up payment is entitled to, derived from the amount ACTUALLY
+    paid -- never from checkout metadata.
+
+    The top-up is one shared Pay-What-You-Want product, and Dodo payment links
+    accept buyer-supplied `metadata_*` params, so `metadata.credits` is
+    attacker-controlled: paying the minimum with a forged `credits` would
+    otherwise grant any number. The money cannot be forged, so match the settled
+    amount against the catalog instead. Returns 0 (refuse) if it matches no pack.
+    """
+    currency = (data.get("currency") or data.get("settlement_currency") or "USD")
+    if str(currency).upper() not in ("USD", ""):
+        return 0
+    cents = _paid_cents(data)
+    if not cents:
+        return 0
+    for pack in billing.TOPUPS:
+        if int(pack["usd"]) * 100 == cents:
+            return int(pack["credits"])
+    return 0
+
+
 def _resolve_user(session, data: dict) -> User | None:
     user = None
     ref = _reference_id(data)
@@ -297,12 +333,20 @@ def handle_event(event: dict, event_id: str) -> dict:
                 session.commit()
                 return {"status": "ignored", "reason": "subscription payment"}
             md = _metadata(data)
-            credits = int(md.get("credits") or 0)
+            # Authoritative: what was paid, matched to the catalog. The metadata
+            # `credits` is buyer-controllable on a PWYW link, so it is only used
+            # to surface forgery attempts in the logs, never to size the grant.
+            claimed = int(md.get("credits") or 0)
+            credits = _credits_for_payment(data)
             user = _resolve_user(session, data)
             payment_id = data.get("payment_id") or data.get("id")
             if not user or credits <= 0 or not payment_id:
                 session.commit()
                 return {"status": "ignored", "reason": "not a fulfillable top-up"}
+            if claimed and claimed != credits:
+                print(f"[clipper] Dodo top-up: metadata claimed {claimed} credits "
+                      f"but the amount paid maps to {credits}; granting {credits} "
+                      f"(payment {payment_id}). Possible forged checkout link.")
             granted = _grant_once(session, payment_id, user, credits,
                                   DODO_TOPUP_PRODUCT_ID, "Dodo credit top-up")
             session.commit()
