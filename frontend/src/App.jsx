@@ -12,6 +12,7 @@ import useTurnstile from "./useTurnstile";
 import UpgradeModal from "./UpgradeModal";
 import WelcomeUpgrade, { PaymentProcessing } from "./WelcomeUpgrade";
 import { usePlan } from "./usePlan";
+import posthog, { isPostHogConfigured } from "./posthog";
 const STAGES = [
   { key: "downloading", label: "Getting your video ready", blurb: "Your video is being prepared." },
   { key: "transcribing", label: "Listening to the conversation", blurb: "KlipCut is following what is being said." },
@@ -20,6 +21,16 @@ const STAGES = [
 ];
 
 const STAGE_ORDER = ["queued", "downloading", "transcribing", "analyzing", "rendering", "done"];
+
+function identifyUser(user) {
+  const distinctId = user?.id;
+  if (!isPostHogConfigured || distinctId === undefined || distinctId === null) return;
+
+  const personProperties = {};
+  if (user.plan) personProperties.plan = user.plan;
+  if (user.email) personProperties.email = user.email;
+  posthog.identify(String(distinctId), personProperties);
+}
 
 function stageState(stageKey, jobStatus) {
   const current = STAGE_ORDER.indexOf(jobStatus);
@@ -665,7 +676,10 @@ export default function App() {
         try { freshUser = await fetchMe(); }
         catch { /* fetchMe network error */ }
         if (cancelled) return;
-        if (freshUser) setUser(freshUser);
+        if (freshUser) {
+          identifyUser(freshUser);
+          setUser(freshUser);
+        }
 
         if (result) {
           try { window.sessionStorage.removeItem("billingBeforeCheckout"); }
@@ -681,7 +695,10 @@ export default function App() {
       /* Normal boot — not returning from payment */
       try {
         const u = await fetchMe();
-        if (!cancelled) setUser(u);
+        if (!cancelled) {
+          if (u) identifyUser(u);
+          setUser(u);
+        }
       } catch { /* offline or server down */ }
     }
 
@@ -716,6 +733,7 @@ export default function App() {
 
   function handleAuthed(nextUser) {
     const pending = authIntent;
+    identifyUser(nextUser);
     setUser(nextUser);
     setAuthIntent(null);
     if (pending === "studio") enterStudio();
@@ -734,6 +752,7 @@ export default function App() {
     setSharing(index);
     try {
       const { path } = await createShare(job.id, index);
+      if (isPostHogConfigured) posthog.capture("share_link_created");
       const link = `${window.location.origin}${path}`;
       try {
         await navigator.clipboard.writeText(link);
@@ -789,6 +808,7 @@ export default function App() {
   const [progress, setProgress] = useState(0);
   const [openFaq, setOpenFaq] = useState(0);
   const pollRef = useRef(null);
+  const trackedJobRef = useRef(null);
   const resultsRef = useRef(null);
   const urlbarRef = useRef(null);
 
@@ -865,6 +885,14 @@ export default function App() {
         setJob(fresh);
         if (["done", "failed"].includes(fresh.status)) {
           clearInterval(pollRef.current);
+          if (fresh.status === "done" && trackedJobRef.current === fresh.id) {
+            if (isPostHogConfigured) {
+              posthog.capture("clip_generation_completed", {
+                clip_count: fresh.clips?.length || 0,
+              });
+            }
+            trackedJobRef.current = null;
+          }
         }
       } catch {
         // transient poll failure -- keep trying
@@ -936,8 +964,28 @@ export default function App() {
           }, setUploadPct, turnstileToken)
         : await submitJob({ url: url.trim(), ...options, turnstileToken });
       const { job_id } = result;
+      trackedJobRef.current = job_id;
+      if (isPostHogConfigured) {
+        posthog.capture("clip_generation_started", {
+          source_type: sourceMode,
+          clip_count: nClips,
+          template,
+          ratio,
+          captions_enabled: burnSubtitles,
+          high_quality: highQuality,
+          advanced_model: advancedModel,
+        });
+      }
       const fresh = await getJob(job_id);
       setJob(fresh);
+      if (fresh.status === "done" && trackedJobRef.current === fresh.id) {
+        if (isPostHogConfigured) {
+          posthog.capture("clip_generation_completed", {
+            clip_count: fresh.clips?.length || 0,
+          });
+        }
+        trackedJobRef.current = null;
+      }
     } catch (e) {
       if (e.status === 402) {
         requestUpgrade(e.detail?.toLowerCase().includes("source") ? "length" : "clips");
@@ -1083,6 +1131,7 @@ export default function App() {
                       Plans &amp; credits
                     </button>
                     <button role="menuitem" className="danger" onClick={() => {
+                      if (isPostHogConfigured) posthog.reset();
                       logout(); setUser(null); setAccountOpen(false); setShowDash(false);
                     }}>
                       Sign out
@@ -1635,7 +1684,10 @@ export default function App() {
                       <button
                         type="button"
                         className="btn btn-ghost btn-sm clip-edit"
-                        onClick={() => setEditing({ clip, index: i })}
+                        onClick={() => {
+                          if (isPostHogConfigured) posthog.capture("clip_editor_opened");
+                          setEditing({ clip, index: i });
+                        }}
                         title="Trim or extend this clip"
                         data-testid={`clip-trim-${i}`}
                       >
@@ -1676,6 +1728,9 @@ export default function App() {
                                       downloadName(clip.title, i))}
                         download={downloadName(clip.title, i)}
                         data-testid={`clip-download-${i}`}
+                        onClick={() => {
+                          if (isPostHogConfigured) posthog.capture("clip_downloaded");
+                        }}
                       >
                         <svg viewBox="0 0 24 24" width="16" height="16" fill="none" aria-hidden="true">
                           <path d="M12 4v11m0 0 4-4m-4 4-4-4M5 19h14" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" />

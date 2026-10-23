@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { listJobs, getBilling, startCheckout, clipUrl } from "./api";
+import posthog, { isPostHogConfigured } from "./posthog";
 
 function when(iso) {
   if (!iso) return "";
@@ -64,6 +65,12 @@ export default function Dashboard({ user, onOpenJob, onClose, onUpgrade }) {
     try {
       const r = await startCheckout({ credits });
       if (r.checkout_url) {
+        if (isPostHogConfigured) {
+          posthog.capture("checkout_started", {
+            purchase_type: "credit_pack",
+            credit_amount: credits,
+          });
+        }
         setNotice("Opening secure checkout…");
         window.location.assign(r.checkout_url);
         return;

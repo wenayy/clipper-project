@@ -10,6 +10,7 @@ import { PLATFORMS, platformOverlay, BACKGROUNDS, logoSrc } from "./EditorPreset
 import TimelineTracks from "./TimelineTracks";
 import CaptionPresetPicker, { useCaptionPresets } from "./CaptionPresets";
 import { useToast } from "./Toast";
+import posthog, { isPostHogConfigured } from "./posthog";
 
 /* Caption looks come from the server (`/caption-options`), which serves the
    renderer's own preset registry translated into CSS terms. This file used to
@@ -1048,6 +1049,15 @@ export default function LiveEditor({
         overlays: overlayList.length ? overlayList : null,
       });
       const updated = await exportClip(job.id, index);
+      if (isPostHogConfigured) {
+        posthog.capture("clip_exported", {
+          ratio,
+          template,
+          captions_enabled: capOn,
+          overlays_added: overlayList.length > 0,
+          tighten_pauses: tightenPauses,
+        });
+      }
       onSaved(index, updated);
       // Rendering is the slow, expensive step -- finishing it deserves more
       // than a word of grey text. Confirm it, then return to the clips, which

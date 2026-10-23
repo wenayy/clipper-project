@@ -3,6 +3,7 @@ import ReactDOM from "react-dom/client";
 import App from "./App";
 import ToastProvider from "./Toast";
 import SharePage, { shareToken } from "./SharePage";
+import "./posthog";
 import "./styles.css";
 import "./polish.css";
 import "./wizard.css";

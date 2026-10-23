@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { login, register } from "./api";
+import posthog, { isPostHogConfigured } from "./posthog";
 
 /** Sign in / sign up. Kept to email + password -- anything more is friction
  *  before someone has seen the product work. */
@@ -21,6 +22,9 @@ export default function AuthModal({ onClose, onAuthed, initialMode = "signin" })
         ? await register(email.trim(), password)
         : await login(email.trim(), password);
       onAuthed(user);
+      if (isPostHogConfigured) {
+        posthog.capture(signup ? "account_registered" : "user_signed_in");
+      }
       onClose();
     } catch (err) {
       setError(err.message);

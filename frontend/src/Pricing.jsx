@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { AnimatePresence, motion, useReducedMotion } from "framer-motion";
 import { getPlans, startCheckout } from "./api";
+import posthog, { isPostHogConfigured } from "./posthog";
 
 function ModalPlanCard({ plan, credits, yearly, perClip, busy, current, onCredits,
   onBilling, onChoose }) {
@@ -108,6 +109,13 @@ export default function Pricing({ user, onRequireAuth, modal = false, onClose, o
         interval: yearly ? "yearly" : "monthly",
       });
       if (r.checkout_url) {
+        if (isPostHogConfigured) {
+          posthog.capture("checkout_started", {
+            purchase_type: "subscription",
+            plan: plan.id,
+            billing_interval: yearly ? "yearly" : "monthly",
+          });
+        }
         setNotice("Opening secure checkout…");
         /* Remember what the account looked like BEFORE paying, so the return
            journey can tell "the payment landed" from "nothing happened yet" by
